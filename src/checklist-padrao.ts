@@ -1,0 +1,110 @@
+import type { Checklist } from "./types.js";
+
+/**
+ * Check list padrão do carro de emergência (base: check list HRO carro nº 49).
+ * Para outro carro com composição diferente, passe outro check list pela
+ * propriedade `checklist` ou pelo atributo `checklist-url` do componente.
+ */
+export const CHECKLIST_PADRAO: Checklist = [
+  {
+    titulo: "Materiais",
+    itens: [
+      { descricao: "Agulha desc", maximo: 5, opcoes: ["40x12", "25x7"] },
+      { descricao: "Aparelho de tricotomia", maximo: 1 },
+      { descricao: "Cânula de Guedel nº 4", maximo: 1 },
+      { descricao: "Cânula traqueostomia", maximo: 1, opcoes: ["nº 7,0", "nº 7,5", "nº 8,0", "nº 8,5"] },
+      { descricao: "Capa sanfonada videolaparoscopia 15x250cm", maximo: 1 },
+      { descricao: "Cateter venoso central 7 FR (duplo lúmen)", maximo: 1 },
+      { descricao: "Cateter intrav. de segurança (19mm) (Abocath)", maximo: 2, opcoes: ["nº 16", "nº 18", "nº 20", "nº 22", "nº 24"] },
+      { descricao: "Coletor de urina sistema aberto 1200ml", maximo: 1 },
+      { descricao: "Conexão para infusão 2 vias (Polifix)", maximo: 2 },
+      { descricao: "Curativo filme impermeável respirável 8,5x11,5cm (Tegaderm)", maximo: 1 },
+      { descricao: "Eletrodo desc adulto", maximo: 10 },
+      { descricao: "Equipo FS bomba de infusão Bene Fusion", maximo: 1 },
+      { descricao: "Equipo bomba de infusão Bene Fusion", maximo: 4 },
+      { descricao: "Equipo macrogotas", maximo: 2 },
+      { descricao: "Filtro HEPA", maximo: 1 },
+      { descricao: "Filtro HMEF", maximo: 1 },
+      { descricao: "Fixador estéril cateter periférico (IV Fix)", maximo: 1 },
+      { descricao: "Luva cirúrgica estéril", maximo: 1, opcoes: ["nº 6,5", "nº 7,0", "nº 7,5"] },
+      { descricao: "Máscara laríngea nº 4", maximo: 1 },
+      { descricao: "Seringa desc s/ rosca", maximo: 5, opcoes: ["10ml", "20ml"] },
+      { descricao: "Sonda para aspiração traqueal nº 12", maximo: 3 },
+      { descricao: "Sonda nasogástrica longa nº 18", maximo: 1 },
+      { descricao: "Torneirinha 3 vias c/ rosca", maximo: 3 },
+      { descricao: "Sonda endotraqueal c/ balão", maximo: 2, opcoes: ["nº 6,0", "nº 6,5", "nº 7,0", "nº 7,5", "nº 8,0", "nº 8,5"] },
+      { descricao: "Tubo extensor para oxigênio nº 16 (2m)", maximo: 1 },
+      { descricao: "Kit material cateter venoso central adulto", maximo: 1, unidade: "kit" },
+      { descricao: "Kit material de punção pressão invasiva (PAI)", maximo: 1, unidade: "kit" },
+    ],
+  },
+  {
+    titulo: "Materiais CME",
+    itens: [
+      { descricao: "Ambu", maximo: 1, opcoes: ["Adulto", "Pediátrico"] },
+      { descricao: "Fio guia", maximo: 1, opcoes: ["Adulto", "Pediátrico"] },
+      { descricao: "Cadarço", maximo: 5 },
+      { descricao: "Fio guia bougie", maximo: 1 },
+      { descricao: "Garrote", maximo: 1 },
+      { descricao: "Gel", maximo: 1, unidade: "fr" },
+      { descricao: "Lanterna pequena", maximo: 1 },
+      { descricao: "Luva plástica desc", maximo: 10 },
+      { descricao: "Luva procedimento M", maximo: 1, unidade: "cx" },
+      { descricao: "Micropore", maximo: 1, unidade: "rolo" },
+      { descricao: "Laringoscópio com pilha", maximo: 3 },
+      { descricao: "Lâmina para laringoscópio", maximo: 2, opcoes: ["Curva nº 3", "Curva nº 4", "Reta nº 3", "Reta nº 4"] },
+    ],
+  },
+  {
+    titulo: "Medicamentos",
+    itens: [
+      { descricao: "Adenosina 3mg/ml amp 2ml", maximo: 3, unidade: "amp" },
+      { descricao: "Adrenalina / Epinefrina 1mg/ml amp 1ml", maximo: 15, unidade: "amp" },
+      { descricao: "Água destilada amp 10ml", maximo: 10, unidade: "amp" },
+      { descricao: "Amiodarona 50mg/ml amp 3ml", maximo: 3, unidade: "amp" },
+      { descricao: "Atropina 0,5mg/ml amp 1ml", maximo: 3, unidade: "amp" },
+      { descricao: "Gluconato de cálcio 10% amp 10ml", maximo: 4, unidade: "amp" },
+      { descricao: "Diazepam 10mg/2ml amp 2ml", maximo: 1, unidade: "amp" },
+      { descricao: "Etomidato 2mg/ml amp 10ml", maximo: 1, unidade: "amp" },
+      { descricao: "Fenitoína 50mg/ml amp 5ml", maximo: 4, unidade: "amp" },
+      { descricao: "Fentanila 0,05mg/ml amp 2ml", maximo: 3, unidade: "amp" },
+      { descricao: "Flumazenil 0,1mg/ml amp 5ml", maximo: 1, unidade: "amp" },
+      { descricao: "Furosemida 10mg/ml amp 2ml", maximo: 2, unidade: "amp" },
+      { descricao: "Glicose 50% amp 10ml", maximo: 5, unidade: "amp" },
+      { descricao: "Hidrocortisona 500mg", maximo: 1, unidade: "fr" },
+      { descricao: "Lidocaína 2% sem vaso amp 20ml", maximo: 1, unidade: "amp" },
+      { descricao: "Midazolam 5mg/ml amp 3ml", maximo: 2, unidade: "amp" },
+      { descricao: "Naloxona 0,4mg/ml amp 1ml", maximo: 1, unidade: "amp" },
+      { descricao: "Nitroglicerina 5mg/ml amp 10ml", maximo: 1, unidade: "amp" },
+      { descricao: "Bicarbonato de sódio 8,4% fr 250ml", maximo: 2, unidade: "fr" },
+      { descricao: "Nitroprussiato de sódio 50mg", maximo: 1, unidade: "amp" },
+      { descricao: "Sulfato de magnésio 10% amp 10ml", maximo: 2, unidade: "amp" },
+      { descricao: "Suxametônio 100mg", maximo: 1, unidade: "amp" },
+    ],
+  },
+  {
+    titulo: "Especificidades",
+    itens: [
+      { descricao: "Deslanosídeo 0,2mg/ml amp 2ml", maximo: 2, unidade: "amp" },
+      { descricao: "Escetamina, cloridrato de 50mg/ml amp 2ml", maximo: 1, unidade: "amp" },
+      { descricao: "Bicarbonato de sódio 8,4% amp 10ml", maximo: 15, unidade: "amp" },
+    ],
+  },
+  {
+    titulo: "Kits",
+    itens: [
+      { descricao: "Amiodarona 150mg dose manutenção (6 amp)", maximo: 1, unidade: "kit" },
+      { descricao: "Fentanila 0,5mg/10ml concentrado (10 amp)", maximo: 1, unidade: "kit" },
+      { descricao: "Midazolam 50mg/10ml concentrado (10 amp)", maximo: 1, unidade: "kit" },
+      { descricao: "Noradrenalina 8mg/4ml simples (4 amp)", maximo: 1, unidade: "kit" },
+    ],
+  },
+  {
+    titulo: "Soluções",
+    itens: [
+      { descricao: "Cloreto de sódio 0,9% 500ml", maximo: 1, unidade: "fr" },
+      { descricao: "Glicose 5% 250ml", maximo: 2, unidade: "fr" },
+      { descricao: "Ringer lactato 500ml", maximo: 2, unidade: "fr" },
+    ],
+  },
+];

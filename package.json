@@ -1,0 +1,17 @@
+{
+  "name": "prescricao-carro-emergencia",
+  "version": "1.0.0",
+  "description": "Web Component do Formulário de Prescrição de Carro de Emergência para integração com o G-HOSP (HRO/ALVF).",
+  "type": "module",
+  "main": "dist/prescricao-carro-emergencia.js",
+  "types": "build/index.d.ts",
+  "scripts": {
+    "verificar": "tsc --noEmit",
+    "build": "tsc && esbuild src/index.ts --bundle --format=esm --target=es2020 --outfile=dist/prescricao-carro-emergencia.js && esbuild src/index.ts --bundle --format=iife --global-name=PrescricaoCarro --target=es2017 --minify --outfile=dist/prescricao-carro-emergencia.min.js",
+    "exemplo": "npx serve ."
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2",
+    "typescript": "^5.9.3"
+  }
+}

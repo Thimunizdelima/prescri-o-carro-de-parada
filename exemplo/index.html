@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Exemplo de integração · Prescrição Carro de Emergência</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; background: #f2f5fa; }
+    .barra-ghosp { background: #264476; color: #fff; padding: 12px 20px; font-weight: 600; }
+    .log { max-width: 1180px; margin: 0 auto 32px; padding: 0 16px; }
+    .log pre { background: #fff; border: 1px solid #d6dfec; border-radius: 8px; padding: 12px; overflow-x: auto; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <!-- Simulação da tela do G-HOSP. Na integração real, esta parte já existe. -->
+  <div class="barra-ghosp">G-HOSP · Aba Prescrições (simulação)</div>
+
+  <!--
+    1) Inclua o componente. Duas opções:
+       a) Script clássico (funciona em qualquer página HTML, inclusive antigas):
+          <script src="../dist/prescricao-carro-emergencia.min.js"></script>
+       b) Módulo moderno:
+          <script type="module" src="../dist/prescricao-carro-emergencia.js"></script>
+
+    2) Coloque a tag onde o formulário deve aparecer. O G-HOSP preenche os
+       atributos com os dados do paciente e do profissional logado.
+       Sem o atributo "endpoint", a prescrição é apenas exibida na tela.
+  -->
+  <prescricao-carro-emergencia
+      atendimento="2026-0001234"
+      paciente="Paciente de Teste"
+      prescritor="Enf. Responsável"
+      setor="UTI Adulto">
+  </prescricao-carro-emergencia>
+
+  <div class="log">
+    <strong>Dados recebidos pelo G-HOSP (evento prescricao-gerada):</strong>
+    <pre id="log">Gere uma prescrição para ver o JSON aqui.</pre>
+  </div>
+
+  <script src="../dist/prescricao-carro-emergencia.min.js"></script>
+  <script>
+    const form = document.querySelector("prescricao-carro-emergencia");
+
+    // OPÇÃO A — envio automático por HTTP (descomente e ajuste):
+    // form.configurar({
+    //   endpoint: "/ghosp/api/prescricoes/carro-emergencia",
+    //   headers: { "X-CSRF-Token": document.querySelector('meta[name=csrf]')?.content ?? "" }
+    // });
+
+    // OPÇÃO B — função própria do G-HOSP (aqui só simula a gravação):
+    form.enviar = async (prescricao) => {
+      await new Promise(r => setTimeout(r, 400));          // simula latência
+      return { enviado: true, status: 201, idPrescricao: "SIM-" + Date.now().toString().slice(-6) };
+    };
+
+    // OPÇÃO C — o G-HOSP trata tudo pelo evento e cancela o envio interno:
+    form.addEventListener("prescricao-gerada", (e) => {
+      document.getElementById("log").textContent = JSON.stringify(e.detail, null, 2);
+      // e.preventDefault();   // descomente para o G-HOSP gravar por conta própria
+    });
+
+    form.addEventListener("prescricao-enviada", (e) => console.log("Enviada:", e.detail));
+    form.addEventListener("prescricao-erro", (e) => console.warn("Erro:", e.detail));
+  </script>
+</body>
+</html>
