@@ -1,17 +1,24 @@
 {
-  "name": "prescricao-carro-emergencia",
+  "name": "carro-emergencia-prescricao-farmacia",
   "version": "1.0.0",
-  "description": "Web Component do Formulário de Prescrição de Carro de Emergência para integração com o G-HOSP (HRO/ALVF).",
+  "description": "Prescrição do carro de emergência, conferência da farmácia e serviço de integração (HRO/ALVF, G-HOSP).",
   "type": "module",
   "main": "dist/prescricao-carro-emergencia.js",
   "types": "build/index.d.ts",
   "scripts": {
-    "verificar": "tsc --noEmit",
-    "build": "tsc && esbuild src/index.ts --bundle --format=esm --target=es2020 --outfile=dist/prescricao-carro-emergencia.js && esbuild src/index.ts --bundle --format=iife --global-name=PrescricaoCarro --target=es2017 --minify --outfile=dist/prescricao-carro-emergencia.min.js",
+    "verificar": "tsc --noEmit && tsc -p servidor/tsconfig.json",
+    "build": "npm run build:web && npm run build:servidor",
+    "build:web": "tsc && esbuild src/index.ts --bundle --format=esm --target=es2020 --outfile=dist/prescricao-carro-emergencia.js && esbuild src/index.ts --bundle --format=iife --global-name=PrescricaoCarro --target=es2017 --minify --outfile=dist/prescricao-carro-emergencia.min.js",
+    "build:servidor": "esbuild servidor/src/servidor.ts --bundle --platform=node --format=esm --target=node20 --outfile=servidor/dist/servidor.js",
+    "servidor": "node servidor/dist/servidor.js",
     "exemplo": "npx serve ."
   },
   "devDependencies": {
+    "@types/node": "^22.20.4",
     "esbuild": "^0.24.2",
     "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

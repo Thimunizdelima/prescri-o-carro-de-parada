@@ -1,6 +1,7 @@
 import { CHECKLIST_PADRAO } from "./checklist-padrao.js";
 import { ESTILOS } from "./estilos.js";
 import { criarEnvioHttp, type ConfigGHosp } from "./ghosp-client.js";
+import { ClienteServico, ROTULO_FLUXO } from "./integracao.js";
 import { limiteDaLinha, normalizarLinhas, podeAdicionarOpcao } from "./regras.js";
 import type {
   Checklist,
@@ -31,6 +32,18 @@ interface Linha {
 const esc = (s: unknown): string =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
+/** Identificador único (UUID v4), com alternativa para navegadores sem crypto.randomUUID. */
+export const novoId = (): string =>
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+      });
+
+/** Canal usado para avisar a farmácia (outra aba/tela do mesmo navegador) que há prescrição nova. */
+export const CANAL_PADRAO = "carro-emergencia";
+
 const semAcento = (s: string): string => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
 
 /**
@@ -44,6 +57,9 @@ const semAcento = (s: string): string => s.toLowerCase().normalize("NFD").replac
  *   setor          Setor onde o carro foi usado.
  *   numero-carro   Pré-preenche o número do carro de parada.
  *   checklist-url  URL de um JSON com outro check list (mesmo formato de CHECKLIST_PADRAO).
+ *   servidor       URL do serviço de integração (servidor/). Envia a prescrição e acompanha a farmácia em tempo real.
+ *   token          Token do serviço, se exigido.
+ *   canal          Nome do BroadcastChannel que avisa a conferência da farmácia (padrão "carro-emergencia"; "off" desliga).
  *
  * Propriedades / métodos:
  *   checklist               Define o check list via JavaScript.
@@ -88,7 +104,7 @@ export class PrescricaoCarroEmergenciaElement extends HTMLElement {
   }
 
   attributeChangedCallback(nome: string, antigo: string | null, novo: string | null): void {
-    if (antigo === novo || !this.isConnected) return;
+    if (antigo === novo || !this.isConnected || !this.root.firstChild) return;
     if (nome === "checklist-url" && novo) void this.carregarChecklist(novo);
     if (nome === "numero-carro") this.campo("numeroCarro").value = novo ?? "";
     if (nome === "endpoint") this._cfg = novo ? { ...(this._cfg ?? {}), endpoint: novo } : null;
@@ -147,6 +163,7 @@ export class PrescricaoCarroEmergenciaElement extends HTMLElement {
     return {
       tipo: "PRESCRICAO_CARRO_EMERGENCIA",
       versao: 1,
+      id: novoId(),
       dataHora: new Date().toISOString(),
       numeroCarro,
       lacreRompido: this.campo("lacreRompido").value.trim() || null,
@@ -173,6 +190,17 @@ export class PrescricaoCarroEmergenciaElement extends HTMLElement {
       return;
     }
 
+    const canal = this.getAttribute("canal") ?? CANAL_PADRAO;
+    if (canal !== "off" && typeof BroadcastChannel !== "undefined") {
+      try {
+        const bc = new BroadcastChannel(canal);
+        bc.postMessage({ tipo: "prescricao", prescricao: p });
+        bc.close();
+      } catch {
+        /* canal indisponível: segue sem aviso local */
+      }
+    }
+
     const continuar = this.dispatchEvent(
       new CustomEvent("prescricao-gerada", { detail: p, bubbles: true, composed: true, cancelable: true }),
     );
@@ -182,7 +210,7 @@ export class PrescricaoCarroEmergenciaElement extends HTMLElement {
     if (!continuar) {
       status = "Prescrição entregue ao G-HOSP.";
     } else {
-      const envio = this.enviar ?? (this._cfg?.endpoint ? criarEnvioHttp(this._cfg) : null);
+      const envio = this.enviar ?? (this._cfg?.endpoint ? criarEnvioHttp(this._cfg) : this.cliente?.enviarPrescricao ?? null);
       if (!envio) {
         status = "Envio automático para a aba Prescrições do G-HOSP ainda não configurado.";
       } else {
@@ -191,7 +219,9 @@ export class PrescricaoCarroEmergenciaElement extends HTMLElement {
         try {
           const r: ResultadoEnvio = await envio(p);
           if (r.enviado) {
-            status = `Prescrição enviada para a aba Prescrições do G-HOSP${r.idPrescricao ? ` (nº ${esc(r.idPrescricao)})` : ""}.`;
+            status = this.cliente && !this.enviar && !this._cfg?.endpoint
+              ? esc(r.mensagem ?? "Prescrição encaminhada à farmácia.")
+              : `Prescrição enviada para a aba Prescrições do G-HOSP${r.idPrescricao ? ` (nº ${esc(r.idPrescricao)})` : ""}.`;
             this.emitir("prescricao-enviada", { prescricao: p, resultado: r });
           } else {
             erro = true;
@@ -210,6 +240,7 @@ export class PrescricaoCarroEmergenciaElement extends HTMLElement {
     }
 
     this.mostrarPrescricao(p, status, erro);
+    if (!erro && this.cliente) this.acompanhar(p.id);
     msg.textContent = `Prescrição gerada com ${p.itens.length} ${p.itens.length === 1 ? "linha" : "linhas"}.`;
   }
 
@@ -409,6 +440,48 @@ export class PrescricaoCarroEmergenciaElement extends HTMLElement {
   }
 
   private ultima: PrescricaoCarroEmergencia | null = null;
+  private pararEscuta: (() => void) | null = null;
+
+  /** Cliente do serviço de integração, quando o atributo `servidor` está definido. */
+  private get cliente(): ClienteServico | null {
+    const s = this.getAttribute("servidor");
+    return s !== null ? new ClienteServico(s, this.getAttribute("token")) : null;
+  }
+
+  /** Mostra, em tempo real, o andamento da prescrição na farmácia. */
+  private acompanhar(id: string): void {
+    const el = this.$<HTMLElement>("#acomp");
+    if (!el) return;
+    const mostrar = (txt: string) => {
+      el.hidden = false;
+      el.innerHTML = `<strong>Situação na farmácia:</strong> ${txt}`;
+    };
+    mostrar(ROTULO_FLUXO.AGUARDANDO_FARMACIA);
+    this.pararEscuta?.();
+    const cli = this.cliente!;
+    const reler = async () => {
+      const reg = await cli.obter(id);
+      if (!reg) return;
+      if (reg.status === "EM_CONFERENCIA") mostrar(`${ROTULO_FLUXO.EM_CONFERENCIA} por ${esc(reg.farmaceutico)}${reg.atrasada ? " · passou do prazo" : ""}`);
+      else if (reg.status !== "AGUARDANDO_FARMACIA") mostrar(ROTULO_FLUXO[reg.status]);
+    };
+    this.pararEscuta = cli.ouvir((evento, dados) => {
+      const reg = evento === "conferencia-concluida" ? dados.registro : dados;
+      if (reg?.prescricao?.id !== id) return;
+      if (evento === "conferencia-iniciada") mostrar(`${ROTULO_FLUXO.EM_CONFERENCIA} por ${esc(reg.farmaceutico)}`);
+      if (evento === "alerta-sla") mostrar(`${ROTULO_FLUXO[reg.status as keyof typeof ROTULO_FLUXO]} · passou do prazo`);
+      if (evento === "conferencia-concluida") {
+        const falt = (dados.conferencia?.itens ?? []).filter((i: { falta: unknown }) => i.falta).length;
+        mostrar(`${ROTULO_FLUXO[reg.status as keyof typeof ROTULO_FLUXO]}${falt ? ` (${falt} ${falt === 1 ? "item em falta" : "itens em falta"})` : ""} · lacre ${esc(dados.conferencia?.lacreAplicado ?? "—")}`);
+        this.pararEscuta?.();
+        this.pararEscuta = null;
+      }
+    }, () => void reler());
+  }
+
+  disconnectedCallback(): void {
+    this.pararEscuta?.();
+  }
 
   private mostrarPrescricao(p: PrescricaoCarroEmergencia, status: string, erro: boolean): void {
     this.ultima = p;
@@ -428,6 +501,7 @@ export class PrescricaoCarroEmergenciaElement extends HTMLElement {
       </tbody></table>
       ${p.justificativa ? `<div class="bloco"><strong>Justificativa:</strong> ${esc(p.justificativa)}</div>` : ""}
       <div class="bloco status${erro ? " erro" : ""}">${status}</div>
+      <div class="bloco" id="acomp" hidden></div>
       <div class="bloco"><button type="button" class="primario" data-acao="copiar">Copiar prescrição</button>
         <button type="button" data-acao="copiar-json">Copiar dados (JSON)</button></div>`;
     rx.hidden = false;

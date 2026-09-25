@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carro de Emergência · Prescrição e Conferência</title>
+<style>
+  :root { color-scheme: light; --marinho:#264476; --claro:#87add8; --fundo:#f2f5fa; --texto:#1b2b4a; --suave:#5b6b86; --linha:#d6dfec; }
+  body { margin:0; background:var(--fundo); color:var(--texto); font:15px/1.45 "IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif; }
+  .barra { background:var(--marinho); color:#fff; padding:12px 16px; display:flex; flex-wrap:wrap; gap:10px 18px; align-items:center; border-bottom:4px solid var(--claro); }
+  .barra strong { font-size:16px; }
+  .abas { display:flex; gap:6px; flex-wrap:wrap; }
+  .abas button { font:inherit; font-weight:600; border:1px solid rgba(255,255,255,.35); background:transparent; color:#fff; border-radius:6px; padding:7px 14px; cursor:pointer; }
+  .abas button[aria-selected="true"] { background:#fff; color:var(--marinho); border-color:#fff; }
+  .abas button:focus-visible, .sim button:focus-visible { outline:2px solid var(--claro); outline-offset:2px; }
+  .badge { background:#c8102e; color:#fff; border-radius:99px; padding:0 7px; font-size:12px; margin-left:4px; }
+  .aviso { max-width:1180px; margin:14px auto 0; padding:0 16px; font-size:13px; color:var(--suave); }
+  .sim { max-width:1180px; margin:10px auto 0; padding:0 16px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:13px; }
+  .sim button { font:inherit; font-size:13px; border:1px dashed var(--marinho); background:#fff; color:var(--marinho); border-radius:6px; padding:5px 10px; cursor:pointer; }
+</style>
+</head>
+<body>
+  <div class="barra">
+    <strong>Carro de Emergência</strong>
+    <div class="abas" role="tablist">
+      <button role="tab" id="t-enf" aria-selected="false" data-aba="enf">1 · Prescrição (enfermagem)</button>
+      <button role="tab" id="t-farm" aria-selected="true" data-aba="farm">2 · Conferência (farmácia)<span class="badge" id="novas" hidden>nova</span></button>
+    </div>
+  </div>
+
+  <p class="aviso">Demonstração com dados de exemplo: paciente, lotes e códigos de barras são fictícios. Gere uma prescrição na aba 1 e ela chega sozinha na aba 2.</p>
+
+  <section id="p-enf" hidden>
+    <prescricao-carro-emergencia atendimento="EXEMPLO-000124" paciente="Paciente de exemplo" prescritor="Enf. exemplo" setor="UTI Adulto" numero-carro="49"></prescricao-carro-emergencia>
+  </section>
+
+  <section id="p-farm">
+    <div class="sim" id="sim"><span>Simular leitor de código de barras:</span></div>
+    <conferencia-farmacia-carro farmaceutico="Farm. exemplo" validade-minima-dias="90"></conferencia-farmacia-carro>
+  </section>
+
+  <script src="../dist/prescricao-carro-emergencia.min.js"></script>
+  <script src="demo-dados.js"></script>
+  <script>
+    const conf = document.querySelector("conferencia-farmacia-carro");
+    const presc = document.querySelector("prescricao-carro-emergencia");
+    conf.checklist = DEMO.checklist;
+    conf.prescricao = DEMO.prescricaoExemplo;
+
+    // Envio simulado ao G-HOSP (na integração real: configurar({ endpoint }) ou função própria).
+    const simular = async () => { await new Promise(r => setTimeout(r, 300)); return { enviado: true, status: 201, idPrescricao: "EX-" + Date.now().toString().slice(-5) }; };
+    presc.enviar = simular;
+    conf.enviar = simular;
+
+    const sim = document.getElementById("sim");
+    DEMO.leituras.forEach(l => {
+      const b = document.createElement("button");
+      b.type = "button"; b.textContent = l.rotulo;
+      b.onclick = () => conf.ler(l.codigo());
+      sim.appendChild(b);
+    });
+
+    const abrir = (aba) => {
+      document.querySelectorAll("[data-aba]").forEach(b => b.setAttribute("aria-selected", String(b.dataset.aba === aba)));
+      document.getElementById("p-enf").hidden = aba !== "enf";
+      document.getElementById("p-farm").hidden = aba !== "farm";
+      if (aba === "farm") document.getElementById("novas").hidden = true;
+    };
+    document.querySelectorAll("[data-aba]").forEach(b => b.onclick = () => abrir(b.dataset.aba));
+    // Nova prescrição gerada: chega na farmácia pelo canal e a aba ganha o aviso "nova".
+    presc.addEventListener("prescricao-gerada", () => { document.getElementById("novas").hidden = false; });
+  </script>
+</body>
+</html>

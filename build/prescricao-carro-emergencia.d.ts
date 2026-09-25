@@ -5,6 +5,10 @@ export declare class ErroValidacao extends Error {
     pendencias: string[];
     constructor(pendencias: string[]);
 }
+/** Identificador único (UUID v4), com alternativa para navegadores sem crypto.randomUUID. */
+export declare const novoId: () => string;
+/** Canal usado para avisar a farmácia (outra aba/tela do mesmo navegador) que há prescrição nova. */
+export declare const CANAL_PADRAO = "carro-emergencia";
 /**
  * <prescricao-carro-emergencia>
  *
@@ -16,6 +20,9 @@ export declare class ErroValidacao extends Error {
  *   setor          Setor onde o carro foi usado.
  *   numero-carro   Pré-preenche o número do carro de parada.
  *   checklist-url  URL de um JSON com outro check list (mesmo formato de CHECKLIST_PADRAO).
+ *   servidor       URL do serviço de integração (servidor/). Envia a prescrição e acompanha a farmácia em tempo real.
+ *   token          Token do serviço, se exigido.
+ *   canal          Nome do BroadcastChannel que avisa a conferência da farmácia (padrão "carro-emergencia"; "off" desliga).
  *
  * Propriedades / métodos:
  *   checklist               Define o check list via JavaScript.
@@ -62,6 +69,12 @@ export declare class PrescricaoCarroEmergenciaElement extends HTMLElement {
     private atualizarResumo;
     private pedirConfirmacao;
     private ultima;
+    private pararEscuta;
+    /** Cliente do serviço de integração, quando o atributo `servidor` está definido. */
+    private get cliente();
+    /** Mostra, em tempo real, o andamento da prescrição na farmácia. */
+    private acompanhar;
+    disconnectedCallback(): void;
     private mostrarPrescricao;
     private copiar;
 }

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carro de Emergência · HRO</title>
+<style>
+  :root { color-scheme: light; --marinho:#264476; --claro:#87add8; --fundo:#f2f5fa; --texto:#1b2b4a; --suave:#5b6b86; }
+  body { margin:0; background:var(--fundo); color:var(--texto); font:15px/1.45 "IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif; }
+  header { background:var(--marinho); color:#fff; padding:12px 16px; display:flex; flex-wrap:wrap; gap:10px 18px; align-items:center; border-bottom:4px solid var(--claro); }
+  header strong { font-size:16px; }
+  nav { display:flex; gap:6px; flex-wrap:wrap; }
+  nav a { color:#fff; text-decoration:none; font-weight:600; border:1px solid rgba(255,255,255,.35); border-radius:6px; padding:7px 14px; }
+  nav a[aria-current="page"] { background:#fff; color:var(--marinho); border-color:#fff; }
+  nav a:focus-visible, header input:focus-visible { outline:2px solid var(--claro); outline-offset:2px; }
+  .quem { margin-left:auto; display:flex; gap:8px; align-items:center; font-size:13px; }
+  .quem input { font:inherit; border:1px solid rgba(255,255,255,.5); background:rgba(255,255,255,.1); color:#fff; border-radius:6px; padding:5px 8px; width:200px; max-width:50vw; }
+  .badge { background:#c8102e; color:#fff; border-radius:99px; padding:0 7px; font-size:12px; margin-left:4px; }
+</style>
+</head>
+<body>
+  <header>
+    <strong>Carro de Emergência</strong>
+    <nav>
+      <a href="#enfermagem" data-v="enfermagem">Enfermagem</a>
+      <a href="#farmacia" data-v="farmacia">Farmácia<span class="badge" id="fila" hidden></span></a>
+      <a href="#painel" data-v="painel">Painel</a>
+    </nav>
+    <label class="quem">Usuário <input id="usuario" autocomplete="name" placeholder="Seu nome"></label>
+  </header>
+  <main id="vista"></main>
+
+  <script src="/static/prescricao-carro-emergencia.min.js"></script>
+  <script>
+    // Na integração com o G-HOSP, o usuário vem do login do sistema; aqui é um campo simples.
+    const campo = document.getElementById("usuario");
+    try { campo.value = localStorage.getItem("pce-usuario") || ""; } catch {}
+    const usuario = () => campo.value.trim() || "Usuário de plantão";
+    const vista = document.getElementById("vista");
+
+    function mostrar() {
+      const v = (location.hash || "#enfermagem").slice(1);
+      document.querySelectorAll("nav a").forEach(a => a.dataset.v === v ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
+      vista.innerHTML = "";
+      let el;
+      if (v === "farmacia") {
+        el = document.createElement("conferencia-farmacia-carro");
+        el.setAttribute("farmaceutico", usuario());
+        el.setAttribute("validade-minima-dias", "90");
+      } else if (v === "painel") {
+        el = document.createElement("painel-carro-emergencia");
+      } else {
+        el = document.createElement("prescricao-carro-emergencia");
+        el.setAttribute("prescritor", usuario());
+      }
+      el.setAttribute("servidor", "");          // mesmo endereço deste serviço
+      el.setAttribute("canal", "off");          // o tempo real vem do servidor
+      vista.appendChild(el);
+    }
+    campo.addEventListener("change", () => { try { localStorage.setItem("pce-usuario", campo.value.trim()); } catch {} mostrar(); });
+    addEventListener("hashchange", mostrar);
+    mostrar();
+
+    // Contador da fila da farmácia no menu, em tempo real.
+    const cli = new PrescricaoCarro.ClienteServico("");
+    const contar = async () => {
+      const n = (await cli.listar(["AGUARDANDO_FARMACIA"])).length;
+      const b = document.getElementById("fila");
+      b.hidden = !n; b.textContent = n;
+    };
+    cli.ouvir(contar); contar();
+  </script>
+</body>
+</html>

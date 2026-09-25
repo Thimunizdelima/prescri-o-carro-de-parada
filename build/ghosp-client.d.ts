@@ -1,4 +1,4 @@
-import type { FuncaoEnvio } from "./types.js";
+import type { PrescricaoCarroEmergencia, ResultadoEnvio } from "./types.js";
 /** Configuração do envio HTTP para a API de prescrições do G-HOSP. */
 export interface ConfigGHosp {
     /** URL do endpoint que recebe a prescrição (POST, JSON). */
@@ -11,7 +11,7 @@ export interface ConfigGHosp {
     timeoutMs?: number;
 }
 /**
- * Cria a função de envio padrão via HTTP.
+ * Cria a função de envio padrão via HTTP (serve para a prescrição e para a conferência).
  * Espera que o G-HOSP responda 2xx e, opcionalmente, um JSON { idPrescricao, mensagem }.
  */
-export declare function criarEnvioHttp(cfg: ConfigGHosp): FuncaoEnvio;
+export declare function criarEnvioHttp<T = PrescricaoCarroEmergencia>(cfg: ConfigGHosp): (corpoEnvio: T) => Promise<ResultadoEnvio>;
