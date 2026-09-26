@@ -3,6 +3,7 @@ import type {
   Indicadores,
   NomeEvento,
   PrescricaoCarroEmergencia,
+  PrescricaoEnfermagem,
   RegistroFluxo,
   RequisicaoCompra,
   ResultadoEnvio,
@@ -10,6 +11,8 @@ import type {
 } from "./types.js";
 
 export const ROTULO_FLUXO: Record<StatusFluxo, string> = {
+  AGUARDANDO_ENFERMAGEM: "Aguardando enfermagem",
+  EM_ENFERMAGEM: "Em checagem pela enfermagem",
   AGUARDANDO_FARMACIA: "Aguardando farmácia",
   EM_CONFERENCIA: "Em conferência",
   CONFORME: "Reposto",
@@ -61,6 +64,15 @@ export class ClienteServico {
     return r.ok ? r.dados : null;
   }
 
+  /** Enfermagem reserva a prescrição médica finalizada (409 se não finalizada ou se outro enfermeiro já iniciou). */
+  async iniciarEnfermagem(id: string, enfermeiro: string): Promise<{ ok: boolean; mensagem?: string; registro?: RegistroFluxo }> {
+    const r = await this.pedir<RegistroFluxo & { mensagem?: string }>("POST", `/api/prescricoes/${encodeURIComponent(id)}/enfermagem/iniciar`, { enfermeiro });
+    return { ok: r.ok, mensagem: r.dados?.mensagem, registro: r.ok ? r.dados : undefined };
+  }
+
+  liberarEnfermagem = (e: PrescricaoEnfermagem): Promise<ResultadoEnvio> =>
+    this.envio(`/api/prescricoes/${encodeURIComponent(e.prescricaoMedicaId)}/enfermagem`, e);
+
   async assumir(id: string, farmaceutico: string): Promise<{ ok: boolean; mensagem?: string }> {
     const r = await this.pedir<{ mensagem?: string }>("POST", `/api/prescricoes/${encodeURIComponent(id)}/assumir`, { farmaceutico });
     return { ok: r.ok, mensagem: r.dados?.mensagem };
@@ -95,7 +107,10 @@ export class ClienteServico {
     const es = new EventSource(this.base + "/api/eventos", { withCredentials: true });
     // A cada (re)conexão, quem ouve pode reler o estado para não perder eventos do intervalo.
     if (aoConectar) es.onopen = () => aoConectar();
-    const nomes: NomeEvento[] = ["prescricao-recebida", "conferencia-iniciada", "conferencia-concluida", "alerta-sla"];
+    const nomes: NomeEvento[] = [
+      "prescricao-medica-finalizada", "enfermagem-iniciada", "enfermagem-liberada",
+      "prescricao-recebida", "conferencia-iniciada", "conferencia-concluida", "alerta-sla",
+    ];
     for (const n of nomes) es.addEventListener(n, (e) => fn(n, JSON.parse((e as MessageEvent).data)));
     return () => es.close();
   }

@@ -8,6 +8,8 @@ import type {
   StatusFluxo,
 } from "../../src/types.js";
 import type { Armazenamento } from "./armazenamento.js";
+import { medicaFinalizada, montarReposicao, REGRA_BLOQUEIO, validarEnfermagem } from "../../src/regras-enfermagem.js";
+import type { PrescricaoEnfermagem } from "../../src/types.js";
 import { validarConferencia, validarPrescricao } from "./validacao.js";
 
 export class ErroFluxo extends Error {
@@ -58,20 +60,80 @@ export class Fluxo {
     if (erros.length) throw new ErroFluxo(422, erros);
     const existente = this.db.ler().prescricoes[p.id];
     if (existente) return { registro: existente, nova: false }; // idempotente: reenvio não duplica
+    // Prescrição médica: vai para a enfermagem. Formato antigo (formulário único): direto para a farmácia.
+    const medica = p.etapa === "MEDICA";
     const registro: RegistroFluxo = {
       prescricao: p,
-      status: "AGUARDANDO_FARMACIA",
+      ...(medica ? { prescricaoMedica: p, enfermagem: null, enfermeiro: null, inicioEnfermagemEm: null, liberadaEm: null } : { liberadaEm: agora() }),
+      status: medica ? "AGUARDANDO_ENFERMAGEM" : "AGUARDANDO_FARMACIA",
       recebidaEm: agora(),
       inicioConferenciaEm: null,
       farmaceutico: null,
       conferenciaId: null,
       concluidaEm: null,
       atrasada: false,
-      historico: [{ em: agora(), evento: "Prescrição recebida", por: p.contexto?.prescritor ?? null }],
+      historico: [{ em: agora(), evento: medica ? "Prescrição médica finalizada" : "Prescrição recebida", por: p.medico ?? p.contexto?.prescritor ?? null }],
     };
     this.db.alterar((b) => (b.prescricoes[p.id] = registro));
-    this.emitir("prescricao-recebida", registro);
+    this.emitir(medica ? "prescricao-medica-finalizada" : "prescricao-recebida", registro);
     return { registro, nova: true };
+  }
+
+  // ---------------------------------------------------------------- enfermagem
+  private reservadaPorOutro(desde: string | null | undefined, dono: string | null | undefined, eu: string): boolean {
+    return !!dono && dono !== eu && Date.now() - Date.parse(desde ?? "") < this.op.reservaMinutos * 60_000;
+  }
+
+  /** Enfermagem inicia. REGRA: só depois da prescrição médica finalizada. */
+  iniciarEnfermagem(id: string, enfermeiro: string): RegistroFluxo {
+    const r = this.obter(id);
+    if (!enfermeiro?.trim()) throw new ErroFluxo(400, ["Informe o enfermeiro."]);
+    if (!medicaFinalizada(r.prescricaoMedica)) throw new ErroFluxo(409, [REGRA_BLOQUEIO]);
+    if (r.status !== "AGUARDANDO_ENFERMAGEM" && r.status !== "EM_ENFERMAGEM")
+      throw new ErroFluxo(409, ["A enfermagem já liberou esta prescrição."]);
+    if (r.status === "EM_ENFERMAGEM" && this.reservadaPorOutro(r.inicioEnfermagemEm, r.enfermeiro, enfermeiro))
+      throw new ErroFluxo(409, [`Em checagem por ${r.enfermeiro}.`]);
+    this.db.alterar(() => {
+      if (r.status !== "EM_ENFERMAGEM" || r.enfermeiro !== enfermeiro) {
+        r.status = "EM_ENFERMAGEM";
+        r.enfermeiro = enfermeiro;
+        r.inicioEnfermagemEm = agora();
+        r.historico.push({ em: agora(), evento: "Prescrição de enfermagem iniciada", por: enfermeiro });
+      }
+    });
+    this.emitir("enfermagem-iniciada", r);
+    return r;
+  }
+
+  /** Enfermagem confere a prescrição médica, prescreve materiais/cuidados e libera a reposição para a farmácia. */
+  liberarEnfermagem(id: string, e: PrescricaoEnfermagem): RegistroFluxo {
+    const r = this.obter(id);
+    if (!medicaFinalizada(r.prescricaoMedica)) throw new ErroFluxo(409, [REGRA_BLOQUEIO]);
+    if (r.enfermagem && r.enfermagem.id === e?.id) return r; // idempotente
+    if (r.status !== "AGUARDANDO_ENFERMAGEM" && r.status !== "EM_ENFERMAGEM")
+      throw new ErroFluxo(409, ["A enfermagem já liberou esta prescrição."]);
+    if (r.status === "EM_ENFERMAGEM" && this.reservadaPorOutro(r.inicioEnfermagemEm, r.enfermeiro, e?.enfermeiro))
+      throw new ErroFluxo(409, [`Em checagem por ${r.enfermeiro}.`]);
+    const erros = validarEnfermagem(e, r.prescricaoMedica!);
+    if (erros.length) throw new ErroFluxo(422, erros);
+    const reposicao = montarReposicao(r.prescricaoMedica!, e); // recalculado no servidor, não confia no navegador
+    const nadaARepor = reposicao.itens.length === 0;
+    this.db.alterar(() => {
+      r.enfermagem = e;
+      r.enfermeiro = e.enfermeiro;
+      r.prescricao = reposicao;
+      r.liberadaEm = agora();
+      r.atrasada = false;
+      r.historico.push({ em: agora(), evento: "Liberada para a farmácia", por: e.enfermeiro });
+      if (nadaARepor) {
+        r.status = "CONFORME";
+        r.concluidaEm = agora();
+        r.historico.push({ em: agora(), evento: "Nada a repor", por: null });
+      } else r.status = "AGUARDANDO_FARMACIA";
+    });
+    this.emitir("enfermagem-liberada", r);
+    if (!nadaARepor) this.emitir("prescricao-recebida", r); // agora, e só agora, a farmácia recebe
+    return r;
   }
 
   listar(filtro: { status?: StatusFluxo[]; limite?: number } = {}): RegistroFluxo[] {
@@ -93,6 +155,8 @@ export class Fluxo {
     const r = this.obter(id);
     if (!farmaceutico?.trim()) throw new ErroFluxo(400, ["Informe o farmacêutico."]);
     if (r.status === "CONFORME" || r.status === "COM_PENDENCIAS") throw new ErroFluxo(409, ["Esta prescrição já foi conferida."]);
+    if (r.status === "AGUARDANDO_ENFERMAGEM" || r.status === "EM_ENFERMAGEM")
+      throw new ErroFluxo(409, ["Aguardando liberação da enfermagem."]);
     if (r.status === "EM_CONFERENCIA" && r.farmaceutico !== farmaceutico) {
       const desde = Date.parse(r.inicioConferenciaEm ?? "");
       if (Date.now() - desde < this.op.reservaMinutos * 60_000)
@@ -115,6 +179,8 @@ export class Fluxo {
     const banco = this.db.ler();
     if (banco.conferencias[c.id]) return r; // idempotente
     if (r.status === "CONFORME" || r.status === "COM_PENDENCIAS") throw new ErroFluxo(409, ["Esta prescrição já foi conferida."]);
+    if (r.status === "AGUARDANDO_ENFERMAGEM" || r.status === "EM_ENFERMAGEM")
+      throw new ErroFluxo(409, ["Aguardando liberação da enfermagem."]);
     const erros = validarConferencia(c, r.prescricao);
     if (erros.length) throw new ErroFluxo(422, erros);
 
@@ -153,10 +219,13 @@ export class Fluxo {
     const novas: RegistroFluxo[] = [];
     this.db.alterar((b) => {
       for (const r of Object.values(b.prescricoes)) {
-        const aberta = r.status === "AGUARDANDO_FARMACIA" || r.status === "EM_CONFERENCIA";
-        if (aberta && !r.atrasada && Date.now() - Date.parse(r.recebidaEm) > limite) {
+        const naEnfermagem = r.status === "AGUARDANDO_ENFERMAGEM" || r.status === "EM_ENFERMAGEM";
+        const naFarmacia = r.status === "AGUARDANDO_FARMACIA" || r.status === "EM_CONFERENCIA";
+        // O prazo conta por etapa: da finalização médica até a liberação, e da liberação até a conferência.
+        const desde = naEnfermagem ? r.recebidaEm : (r.liberadaEm ?? r.recebidaEm);
+        if ((naEnfermagem || naFarmacia) && !r.atrasada && Date.now() - Date.parse(desde) > limite) {
           r.atrasada = true;
-          r.historico.push({ em: agora(), evento: `Passou do prazo de ${this.op.slaMinutos} min`, por: null });
+          r.historico.push({ em: agora(), evento: `Passou do prazo de ${this.op.slaMinutos} min (${naEnfermagem ? "enfermagem" : "farmácia"})`, por: null });
           novas.push(r);
         }
       }
@@ -172,11 +241,13 @@ export class Fluxo {
     const concl = lista.filter((r) => r.concluidaEm?.startsWith(hojeStr));
     const tempos = concl.map((r) => (Date.parse(r.concluidaEm!) - Date.parse(r.recebidaEm)) / 60_000);
     return {
+      aguardandoEnfermagem: lista.filter((r) => r.status === "AGUARDANDO_ENFERMAGEM").length,
+      emEnfermagem: lista.filter((r) => r.status === "EM_ENFERMAGEM").length,
       aguardando: lista.filter((r) => r.status === "AGUARDANDO_FARMACIA").length,
       emConferencia: lista.filter((r) => r.status === "EM_CONFERENCIA").length,
       concluidasHoje: concl.length,
       comPendenciasHoje: concl.filter((r) => r.status === "COM_PENDENCIAS").length,
-      atrasadas: lista.filter((r) => r.atrasada && (r.status === "AGUARDANDO_FARMACIA" || r.status === "EM_CONFERENCIA")).length,
+      atrasadas: lista.filter((r) => r.atrasada && r.status !== "CONFORME" && r.status !== "COM_PENDENCIAS").length,
       tempoMedioMinutos: tempos.length ? Math.round(tempos.reduce((s, t) => s + t, 0) / tempos.length) : null,
       requisicoesAbertas: b.requisicoes.filter((q) => q.status === "ABERTA").length,
       slaMinutos: this.op.slaMinutos,

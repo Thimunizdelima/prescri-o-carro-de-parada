@@ -14,6 +14,8 @@ const decorrido = (desde: string, ate: string | null) => {
 };
 
 const COR: Record<StatusFluxo, string> = {
+  AGUARDANDO_ENFERMAGEM: "PENDENTE",
+  EM_ENFERMAGEM: "PARCIAL",
   AGUARDANDO_FARMACIA: "PENDENTE",
   EM_CONFERENCIA: "PARCIAL",
   CONFORME: "CONFERIDO",
@@ -103,7 +105,7 @@ export class PainelCarroEmergenciaElement extends HTMLElement {
     const linhas = this.regs
       .map((r) => {
         const p = r.prescricao;
-        const aberta = r.status === "AGUARDANDO_FARMACIA" || r.status === "EM_CONFERENCIA";
+        const aberta = r.status !== "CONFORME" && r.status !== "COM_PENDENCIAS";
         return `<tr class="${r.atrasada && aberta ? "atrasada" : ""}">
           <td><span class="chip ${COR[r.status]}">${ROTULO_FLUXO[r.status]}</span></td>
           <td class="n">nº ${esc(p.numeroCarro)}</td>
@@ -111,6 +113,7 @@ export class PainelCarroEmergenciaElement extends HTMLElement {
           <td class="n">${p.itens.length} ${p.itens.length === 1 ? "item" : "itens"}</td>
           <td class="n">${hora(r.recebidaEm)}</td>
           <td class="n ${r.atrasada && aberta ? "atraso" : ""}">${decorrido(r.recebidaEm, r.concluidaEm)}${r.atrasada && aberta ? " · atrasada" : ""}</td>
+          <td>${esc(r.enfermeiro ?? "—")}</td>
           <td>${esc(r.farmaceutico ?? "—")}</td></tr>`;
       })
       .join("");
@@ -126,6 +129,7 @@ export class PainelCarroEmergenciaElement extends HTMLElement {
         <div class="topo"><h1>Painel do Carro de Emergência</h1>
           <span class="ao-vivo${this.conectado ? "" : " off"}">${this.conectado ? "Ao vivo" : "Sem conexão com o serviço"}</span></div>
         <div class="kpis">
+          ${kpi("Aguardando enfermagem", i ? i.aguardandoEnfermagem + i.emEnfermagem : "—")}
           ${kpi("Aguardando farmácia", i?.aguardando ?? "—")}
           ${kpi("Em conferência", i?.emConferencia ?? "—")}
           ${kpi(`Atrasadas (> ${i?.slaMinutos ?? "—"} min)`, i?.atrasadas ?? "—", !!i?.atrasadas)}
@@ -135,8 +139,8 @@ export class PainelCarroEmergenciaElement extends HTMLElement {
         </div>
         <h2 class="sub">Prescrições recentes</h2>
         <div class="tabela"><table>
-          <thead><tr><th>Situação</th><th>Carro</th><th>Paciente</th><th>Itens</th><th>Recebida</th><th>Tempo</th><th>Farmacêutico</th></tr></thead>
-          <tbody>${linhas || `<tr><td colspan="7">Nenhuma prescrição ainda.</td></tr>`}</tbody></table></div>
+          <thead><tr><th>Situação</th><th>Carro</th><th>Paciente</th><th>Itens</th><th>Recebida</th><th>Tempo</th><th>Enfermeiro</th><th>Farmacêutico</th></tr></thead>
+          <tbody>${linhas || `<tr><td colspan="8">Nenhuma prescrição ainda.</td></tr>`}</tbody></table></div>
         <h2 class="sub">Requisições de compra abertas (faltas)</h2>
         <div class="tabela"><table>
           <thead><tr><th>Item</th><th>Qtd.</th><th>Carro</th><th>Motivo</th><th>Aberta em</th><th></th></tr></thead>

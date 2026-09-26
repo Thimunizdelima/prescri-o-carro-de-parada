@@ -58,6 +58,8 @@ export interface ContextoAtendimento {
   paciente: string | null;
   prescritor: string | null;
   setor: string | null;
+  /** Enfermeiro que conferiu e liberou (preenchido na etapa da enfermagem). */
+  enfermeiro?: string | null;
 }
 
 /** Corpo enviado para a aba Prescrições do G-HOSP. */
@@ -73,6 +75,17 @@ export interface PrescricaoCarroEmergencia {
   contexto: ContextoAtendimento;
   itens: ItemPrescricao[];
   justificativa: string | null;
+  /**
+   * Etapa do documento:
+   *  - "MEDICA": prescrição médica (medicamentos usados na parada). Só libera a enfermagem depois de finalizada.
+   *  - "REPOSICAO": consolidado liberado pela enfermagem (medicamentos consumidos + materiais) que a farmácia confere.
+   * Ausente = formato antigo (formulário único), tratado como REPOSICAO.
+   */
+  etapa?: "MEDICA" | "REPOSICAO";
+  /** Data/hora em que o médico finalizou a prescrição (obrigatório para a enfermagem iniciar). */
+  finalizadaEm?: string | null;
+  /** Médico que finalizou (CRM opcional). */
+  medico?: string | null;
 }
 
 /** Resultado do envio ao G-HOSP. */
@@ -145,7 +158,13 @@ export type FuncaoEnvioConferencia = (c: ConferenciaReposicao) => Promise<Result
 
 // ============================ Serviço de integração ============================
 
-export type StatusFluxo = "AGUARDANDO_FARMACIA" | "EM_CONFERENCIA" | "CONFORME" | "COM_PENDENCIAS";
+export type StatusFluxo =
+  | "AGUARDANDO_ENFERMAGEM"
+  | "EM_ENFERMAGEM"
+  | "AGUARDANDO_FARMACIA"
+  | "EM_CONFERENCIA"
+  | "CONFORME"
+  | "COM_PENDENCIAS";
 
 export interface EventoHistorico {
   em: string;
@@ -155,7 +174,15 @@ export interface EventoHistorico {
 
 /** Registro de uma prescrição no serviço de integração (o "prontuário" do fluxo). */
 export interface RegistroFluxo {
+  /** Documento que a farmácia confere (após a liberação da enfermagem, é o consolidado de reposição). */
   prescricao: PrescricaoCarroEmergencia;
+  /** Prescrição médica original, finalizada. */
+  prescricaoMedica?: PrescricaoCarroEmergencia;
+  /** Prescrição/conferência/liberação da enfermagem. */
+  enfermagem?: PrescricaoEnfermagem | null;
+  enfermeiro?: string | null;
+  inicioEnfermagemEm?: string | null;
+  liberadaEm?: string | null;
   status: StatusFluxo;
   recebidaEm: string;
   inicioConferenciaEm: string | null;
@@ -198,6 +225,8 @@ export interface RequisicaoCompra {
 }
 
 export interface Indicadores {
+  aguardandoEnfermagem: number;
+  emEnfermagem: number;
   aguardando: number;
   emConferencia: number;
   concluidasHoje: number;
@@ -209,4 +238,55 @@ export interface Indicadores {
 }
 
 /** Eventos em tempo real (Server-Sent Events) emitidos pelo serviço. */
-export type NomeEvento = "prescricao-recebida" | "conferencia-iniciada" | "conferencia-concluida" | "alerta-sla";
+export type NomeEvento =
+  | "prescricao-medica-finalizada"
+  | "enfermagem-iniciada"
+  | "enfermagem-liberada"
+  | "prescricao-recebida" // para a farmácia: só acontece depois da liberação da enfermagem
+  | "conferencia-iniciada"
+  | "conferencia-concluida"
+  | "alerta-sla";
+
+// ============================ Enfermagem (pós-parada) ============================
+
+export type MotivoPerda = "QUEBRA" | "DILUIDO_NAO_UTILIZADO" | "CONTAMINADO" | "OUTRO";
+export type MotivoNaoAdministrado = "SUSPENSO_PELO_MEDICO" | "EVOLUCAO_DO_PACIENTE" | "OUTRO";
+
+/** Checagem, pela enfermagem, de um item da prescrição médica. */
+export interface ChecagemItem {
+  secao: string;
+  codigo: string | null;
+  descricao: string;
+  opcao: string | null;
+  unidade: Unidade;
+  prescrito: number;
+  administrado: number;
+  horario: string | null; // HH:MM
+  naoAdministrado: { motivo: MotivoNaoAdministrado; observacao: string | null } | null;
+  /** Perdas que também saíram do carro (quebra, diluído e não utilizado...). */
+  perda: { quantidade: number; motivo: MotivoPerda; observacao: string | null } | null;
+}
+
+export interface CuidadoEnfermagem {
+  descricao: string;
+  frequencia: string | null;
+}
+
+/** Prescrição / conferência / liberação da enfermagem após a parada. */
+export interface PrescricaoEnfermagem {
+  tipo: "PRESCRICAO_ENFERMAGEM_CARRO";
+  versao: 1;
+  id: string;
+  prescricaoMedicaId: string;
+  dataHora: string;
+  enfermeiro: string;
+  coren: string | null;
+  numeroCarro: string;
+  lacreRompido: string;
+  lacreNovo: string | null;
+  checagem: ChecagemItem[];
+  /** Materiais usados (prescrição de enfermagem), limitados ao check list. */
+  materiais: ItemPrescricao[];
+  cuidados: CuidadoEnfermagem[];
+  justificativa: string | null;
+}

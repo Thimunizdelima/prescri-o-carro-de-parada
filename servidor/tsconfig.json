@@ -9,5 +9,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src", "../src/types.ts", "../src/checklist-padrao.ts", "../src/conferencia-regras.ts"]
+  "include": ["src", "../src/types.ts", "../src/checklist-padrao.ts", "../src/conferencia-regras.ts", "../src/regras-enfermagem.ts", "../src/regras.ts"]
 }

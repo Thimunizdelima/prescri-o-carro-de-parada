@@ -63,7 +63,7 @@ const EXTRA = /* css */ `
 .meta div{display:flex;flex-direction:column;gap:2px}
 .meta small{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--pce-suave);font-weight:600}
 .meta strong{font-weight:600}
-.alerta{border-left:4px solid var(--pce-alerta);background:var(--pce-alerta-fundo);border-radius:6px;padding:10px 14px;font-size:14px}
+.alerta{white-space:pre-line;border-left:4px solid var(--pce-alerta);background:var(--pce-alerta-fundo);border-radius:6px;padding:10px 14px;font-size:14px}
 .leitor{display:flex;flex-direction:column;gap:8px;background:var(--pce-superficie);border:2px solid var(--pce-primaria);border-radius:10px;padding:14px 16px}
 .leitor label{font-weight:600;color:var(--pce-secundaria)}
 .leitor input{font:600 18px ui-monospace,"IBM Plex Mono",monospace;padding:12px 14px;border:1px solid var(--pce-linha);border-radius:8px;width:100%}
@@ -250,6 +250,7 @@ export class ConferenciaFarmaciaElement extends HTMLElement {
 
   receber(p: PrescricaoCarroEmergencia): void {
     if (p?.tipo !== "PRESCRICAO_CARRO_EMERGENCIA") return;
+    if (p.etapa === "MEDICA") return; // a farmácia só recebe depois da liberação da enfermagem
     if (this._p?.id === p.id || this.abrindo.has(p.id) || this.fila.some((f) => f.id === p.id)) return;
     if (!this._p || this.concluida) {
       void this.abrir(p).then((ok) => ok && this.avisar(`Prescrição do carro nº ${p.numeroCarro} carregada.`, "ok"));
@@ -559,9 +560,9 @@ export class ConferenciaFarmaciaElement extends HTMLElement {
     let corpo: string;
     if (!p) {
       corpo = `<div class="card vazio">
-        <strong>Aguardando prescrição.</strong>
+        <strong>Aguardando liberação da enfermagem.</strong>
         <div class="fb" id="fb" aria-live="polite"></div>
-        <span class="msg">As prescrições geradas no formulário do carro chegam aqui automaticamente. Você também pode colar o JSON da prescrição abaixo.</span>
+        <span class="msg">As reposições liberadas pela enfermagem chegam aqui automaticamente. Você também pode colar o JSON da prescrição abaixo.</span>
         <textarea id="json" aria-label="JSON da prescrição" placeholder='{"tipo":"PRESCRICAO_CARRO_EMERGENCIA", ...}'></textarea>
         <div><button class="primario" type="button" data-acao="colar">Carregar prescrição</button></div>
       </div>`;
@@ -572,7 +573,8 @@ export class ConferenciaFarmaciaElement extends HTMLElement {
         ["Prescrição", dataBr(p.dataHora)],
         ["Paciente", c.paciente],
         ["Atendimento", c.atendimento],
-        ["Prescritor", c.prescritor],
+        ["Médico", p.medico ?? c.prescritor],
+        ["Enfermeiro", c.enfermeiro],
         ["Setor", c.setor],
         ["Lacre rompido", p.lacreRompido],
         ["Lacre novo (enfermagem)", p.lacreNovo],
@@ -582,7 +584,7 @@ export class ConferenciaFarmaciaElement extends HTMLElement {
         .join("");
       corpo = `
         <div class="card meta">${meta}</div>
-        ${p.justificativa ? `<div class="alerta"><strong>Justificativa da enfermagem:</strong> ${esc(p.justificativa)}</div>` : ""}
+        ${p.justificativa ? `<div class="alerta"><strong>Observações e perdas (enfermagem):</strong> ${esc(p.justificativa)}</div>` : ""}
         <div class="leitor">
           <label for="leitor">Bipe o código de barras (DataMatrix ou EAN) de cada unidade separada</label>
           <input id="leitor" autocomplete="off" spellcheck="false" placeholder="Aguardando leitura…">

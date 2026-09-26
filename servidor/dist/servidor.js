@@ -155,9 +155,109 @@ var TEXTO_PROBLEMA = {
   VALIDADE_CURTA: "Validade curta"
 };
 
+// src/regras-enfermagem.ts
+var SECOES_MEDICAS = ["Medicamentos", "Especificidades", "Kits", "Solu\xE7\xF5es"];
+var SECOES_MATERIAIS = ["Materiais", "Materiais CME"];
+var TEXTO_PERDA = {
+  QUEBRA: "Quebra",
+  DILUIDO_NAO_UTILIZADO: "Dilu\xEDdo e n\xE3o utilizado",
+  CONTAMINADO: "Contaminado",
+  OUTRO: "Outro"
+};
+var TEXTO_NAO_ADMINISTRADO = {
+  SUSPENSO_PELO_MEDICO: "Suspenso pelo m\xE9dico",
+  EVOLUCAO_DO_PACIENTE: "Evolu\xE7\xE3o do paciente",
+  OUTRO: "Outro"
+};
+var REGRA_BLOQUEIO = "A prescri\xE7\xE3o de enfermagem somente pode ser iniciada ap\xF3s a finaliza\xE7\xE3o da prescri\xE7\xE3o m\xE9dica.";
+function medicaFinalizada(p) {
+  return !!p && p.etapa === "MEDICA" && !!p.finalizadaEm;
+}
+function itemDoChecklist(descricao, checklist = CHECKLIST_PADRAO) {
+  for (const s of checklist) for (const i of s.itens) if (i.descricao === descricao) return i;
+  return void 0;
+}
+var consumo = (c) => c.administrado + (c.perda?.quantidade ?? 0);
+function validarEnfermagem(e, medica, checklist = CHECKLIST_PADRAO) {
+  const erros = [];
+  if (!medicaFinalizada(medica)) return [REGRA_BLOQUEIO];
+  if (e?.tipo !== "PRESCRICAO_ENFERMAGEM_CARRO") return ["Corpo n\xE3o \xE9 uma prescri\xE7\xE3o de enfermagem."];
+  if (e.prescricaoMedicaId !== medica.id) erros.push("A prescri\xE7\xE3o de enfermagem n\xE3o corresponde a esta prescri\xE7\xE3o m\xE9dica.");
+  if (!e.enfermeiro?.trim()) erros.push("Informe o enfermeiro respons\xE1vel.");
+  if (!e.numeroCarro?.trim()) erros.push("Informe o n\xFAmero do carro de parada.");
+  if (!e.lacreRompido?.trim()) erros.push("Informe o lacre rompido.");
+  const chave = (d, o) => `${d}|${o ?? ""}`;
+  const porChave = new Map(e.checagem.map((c) => [chave(c.descricao, c.opcao), c]));
+  const somaCarro = /* @__PURE__ */ new Map();
+  for (const it of medica.itens) {
+    const nome = `${it.descricao}${it.opcao ? " \u2014 " + it.opcao : ""}`;
+    const c = porChave.get(chave(it.descricao, it.opcao));
+    if (!c) {
+      erros.push(`Faltou checar ${nome}.`);
+      continue;
+    }
+    if (c.prescrito !== it.quantidade) erros.push(`${nome}: quantidade prescrita divergente.`);
+    if (!Number.isInteger(c.administrado) || c.administrado < 0 || c.administrado > it.quantidade)
+      erros.push(`${nome}: administrado deve ficar entre 0 e ${it.quantidade}.`);
+    if (c.administrado < it.quantidade && !c.naoAdministrado?.motivo)
+      erros.push(`${nome}: informe o motivo de n\xE3o ter administrado ${it.quantidade - c.administrado}.`);
+    if (c.perda && (!Number.isInteger(c.perda.quantidade) || c.perda.quantidade < 1 || !c.perda.motivo))
+      erros.push(`${nome}: informe quantidade e motivo da perda.`);
+    somaCarro.set(it.descricao, (somaCarro.get(it.descricao) ?? 0) + consumo(c));
+  }
+  if (e.checagem.length !== medica.itens.length) erros.push("A checagem tem itens que n\xE3o est\xE3o na prescri\xE7\xE3o m\xE9dica.");
+  for (const m of e.materiais ?? []) {
+    const ref = itemDoChecklist(m.descricao, checklist);
+    if (!ref || !SECOES_MATERIAIS.includes(m.secao)) {
+      erros.push(`Material fora do check list: ${m.descricao}.`);
+      continue;
+    }
+    if (!Number.isInteger(m.quantidade) || m.quantidade < 1) erros.push(`Quantidade inv\xE1lida em ${m.descricao}.`);
+    if (ref.opcoes && (!m.opcao || !ref.opcoes.includes(m.opcao))) erros.push(`Escolha a op\xE7\xE3o utilizada em ${m.descricao}.`);
+    somaCarro.set(m.descricao, (somaCarro.get(m.descricao) ?? 0) + m.quantidade);
+  }
+  for (const [d, soma] of somaCarro) {
+    const max = itemDoChecklist(d, checklist)?.maximo;
+    if (max !== void 0 && soma > max) erros.push(`${d}: sa\xEDda do carro (${soma}) ultrapassa o quantitativo do check list (${max}).`);
+  }
+  return erros;
+}
+function montarReposicao(medica, e) {
+  const itens = [];
+  const notas = [];
+  for (const c of e.checagem) {
+    const nome = `${c.descricao}${c.opcao ? " \u2014 " + c.opcao : ""}`;
+    if (c.perda) notas.push(`Perda: ${c.perda.quantidade} ${c.unidade} de ${nome} (${TEXTO_PERDA[c.perda.motivo]}${c.perda.observacao ? ": " + c.perda.observacao : ""}).`);
+    if (c.administrado < c.prescrito && c.naoAdministrado)
+      notas.push(`N\xE3o administrado: ${c.prescrito - c.administrado} ${c.unidade} de ${nome} (${TEXTO_NAO_ADMINISTRADO[c.naoAdministrado.motivo]}) \u2014 retorna ao carro.`);
+    const q = consumo(c);
+    if (q > 0) {
+      const ref = itemDoChecklist(c.descricao);
+      itens.push({ secao: c.secao, codigo: c.codigo, descricao: c.descricao, opcao: c.opcao, quantidade: q, unidade: c.unidade, quantitativoPrevisto: ref?.maximo ?? q });
+    }
+  }
+  itens.push(...e.materiais);
+  const justificativa = [e.justificativa?.trim(), ...notas].filter(Boolean).join("\n") || null;
+  return {
+    tipo: "PRESCRICAO_CARRO_EMERGENCIA",
+    versao: 1,
+    etapa: "REPOSICAO",
+    id: medica.id,
+    dataHora: e.dataHora,
+    numeroCarro: e.numeroCarro,
+    lacreRompido: e.lacreRompido,
+    lacreNovo: e.lacreNovo,
+    contexto: { ...medica.contexto, enfermeiro: e.enfermeiro },
+    itens,
+    justificativa,
+    finalizadaEm: medica.finalizadaEm,
+    medico: medica.medico ?? medica.contexto?.prescritor ?? null
+  };
+}
+
 // servidor/src/validacao.ts
 var MOTIVOS = /* @__PURE__ */ new Set(["SEM_ESTOQUE", "AGUARDANDO_COMPRA", "ITEM_SUSPENSO", "OUTRO"]);
-function itemDoChecklist(descricao, checklist = CHECKLIST_PADRAO) {
+function itemDoChecklist2(descricao, checklist = CHECKLIST_PADRAO) {
   for (const s of checklist) for (const i of s.itens) if (i.descricao === descricao) return i;
   return void 0;
 }
@@ -165,21 +265,24 @@ function validarPrescricao(p, checklist = CHECKLIST_PADRAO) {
   const erros = [];
   if (p?.tipo !== "PRESCRICAO_CARRO_EMERGENCIA") return ["Corpo n\xE3o \xE9 uma prescri\xE7\xE3o de carro de emerg\xEAncia."];
   if (!p.id) erros.push("Prescri\xE7\xE3o sem id.");
-  if (!p.numeroCarro?.trim()) erros.push("N\xFAmero do carro de parada ausente.");
+  const medica = p.etapa === "MEDICA";
+  if (medica && !p.finalizadaEm) erros.push("Prescri\xE7\xE3o m\xE9dica n\xE3o finalizada.");
+  if (!medica && !p.numeroCarro?.trim()) erros.push("N\xFAmero do carro de parada ausente.");
   if (!Array.isArray(p.itens) || !p.itens.length) erros.push("Prescri\xE7\xE3o sem itens.");
   const somas = /* @__PURE__ */ new Map();
   for (const it of p.itens ?? []) {
-    const ref = itemDoChecklist(it.descricao, checklist);
+    const ref = itemDoChecklist2(it.descricao, checklist);
     if (!ref) {
       erros.push(`Item fora do check list: ${it.descricao}.`);
       continue;
     }
+    if (medica && !SECOES_MEDICAS.includes(it.secao)) erros.push(`${it.descricao} n\xE3o \xE9 prescri\xE7\xE3o m\xE9dica (materiais s\xE3o da enfermagem).`);
     if (!Number.isInteger(it.quantidade) || it.quantidade < 1) erros.push(`Quantidade inv\xE1lida em ${it.descricao}.`);
     if (ref.opcoes && (!it.opcao || !ref.opcoes.includes(it.opcao))) erros.push(`Op\xE7\xE3o inv\xE1lida em ${it.descricao}.`);
     somas.set(it.descricao, (somas.get(it.descricao) ?? 0) + it.quantidade);
   }
   for (const [d, soma] of somas) {
-    const max = itemDoChecklist(d, checklist).maximo;
+    const max = itemDoChecklist2(d, checklist).maximo;
     if (soma > max) erros.push(`${d}: ${soma} ultrapassa o quantitativo do check list (${max}).`);
   }
   return erros;
@@ -206,7 +309,7 @@ function validarConferencia(c, p, checklist = CHECKLIST_PADRAO) {
     const falta = ci.falta?.quantidade ?? 0;
     if (ci.reposto + falta !== it.quantidade) erros.push(`${nome}: reposto + falta deve ser igual ao prescrito.`);
     if (ci.falta && !MOTIVOS.has(ci.falta.motivo)) erros.push(`${nome}: motivo de falta inv\xE1lido.`);
-    const semValidade = !!itemDoChecklist(it.descricao, checklist)?.semValidade;
+    const semValidade = !!itemDoChecklist2(it.descricao, checklist)?.semValidade;
     for (const l of ci.lotes) {
       const prob = problemaDoLote(l, minimo, semValidade);
       if (prob) erros.push(`${nome}: ${TEXTO_PROBLEMA[prob].toLowerCase()} (lote ${l.lote || "\u2014"}).`);
@@ -251,20 +354,76 @@ var Fluxo = class {
     if (erros.length) throw new ErroFluxo(422, erros);
     const existente = this.db.ler().prescricoes[p.id];
     if (existente) return { registro: existente, nova: false };
+    const medica = p.etapa === "MEDICA";
     const registro = {
       prescricao: p,
-      status: "AGUARDANDO_FARMACIA",
+      ...medica ? { prescricaoMedica: p, enfermagem: null, enfermeiro: null, inicioEnfermagemEm: null, liberadaEm: null } : { liberadaEm: agora() },
+      status: medica ? "AGUARDANDO_ENFERMAGEM" : "AGUARDANDO_FARMACIA",
       recebidaEm: agora(),
       inicioConferenciaEm: null,
       farmaceutico: null,
       conferenciaId: null,
       concluidaEm: null,
       atrasada: false,
-      historico: [{ em: agora(), evento: "Prescri\xE7\xE3o recebida", por: p.contexto?.prescritor ?? null }]
+      historico: [{ em: agora(), evento: medica ? "Prescri\xE7\xE3o m\xE9dica finalizada" : "Prescri\xE7\xE3o recebida", por: p.medico ?? p.contexto?.prescritor ?? null }]
     };
     this.db.alterar((b) => b.prescricoes[p.id] = registro);
-    this.emitir("prescricao-recebida", registro);
+    this.emitir(medica ? "prescricao-medica-finalizada" : "prescricao-recebida", registro);
     return { registro, nova: true };
+  }
+  // ---------------------------------------------------------------- enfermagem
+  reservadaPorOutro(desde, dono, eu) {
+    return !!dono && dono !== eu && Date.now() - Date.parse(desde ?? "") < this.op.reservaMinutos * 6e4;
+  }
+  /** Enfermagem inicia. REGRA: só depois da prescrição médica finalizada. */
+  iniciarEnfermagem(id, enfermeiro) {
+    const r = this.obter(id);
+    if (!enfermeiro?.trim()) throw new ErroFluxo(400, ["Informe o enfermeiro."]);
+    if (!medicaFinalizada(r.prescricaoMedica)) throw new ErroFluxo(409, [REGRA_BLOQUEIO]);
+    if (r.status !== "AGUARDANDO_ENFERMAGEM" && r.status !== "EM_ENFERMAGEM")
+      throw new ErroFluxo(409, ["A enfermagem j\xE1 liberou esta prescri\xE7\xE3o."]);
+    if (r.status === "EM_ENFERMAGEM" && this.reservadaPorOutro(r.inicioEnfermagemEm, r.enfermeiro, enfermeiro))
+      throw new ErroFluxo(409, [`Em checagem por ${r.enfermeiro}.`]);
+    this.db.alterar(() => {
+      if (r.status !== "EM_ENFERMAGEM" || r.enfermeiro !== enfermeiro) {
+        r.status = "EM_ENFERMAGEM";
+        r.enfermeiro = enfermeiro;
+        r.inicioEnfermagemEm = agora();
+        r.historico.push({ em: agora(), evento: "Prescri\xE7\xE3o de enfermagem iniciada", por: enfermeiro });
+      }
+    });
+    this.emitir("enfermagem-iniciada", r);
+    return r;
+  }
+  /** Enfermagem confere a prescrição médica, prescreve materiais/cuidados e libera a reposição para a farmácia. */
+  liberarEnfermagem(id, e) {
+    const r = this.obter(id);
+    if (!medicaFinalizada(r.prescricaoMedica)) throw new ErroFluxo(409, [REGRA_BLOQUEIO]);
+    if (r.enfermagem && r.enfermagem.id === e?.id) return r;
+    if (r.status !== "AGUARDANDO_ENFERMAGEM" && r.status !== "EM_ENFERMAGEM")
+      throw new ErroFluxo(409, ["A enfermagem j\xE1 liberou esta prescri\xE7\xE3o."]);
+    if (r.status === "EM_ENFERMAGEM" && this.reservadaPorOutro(r.inicioEnfermagemEm, r.enfermeiro, e?.enfermeiro))
+      throw new ErroFluxo(409, [`Em checagem por ${r.enfermeiro}.`]);
+    const erros = validarEnfermagem(e, r.prescricaoMedica);
+    if (erros.length) throw new ErroFluxo(422, erros);
+    const reposicao = montarReposicao(r.prescricaoMedica, e);
+    const nadaARepor = reposicao.itens.length === 0;
+    this.db.alterar(() => {
+      r.enfermagem = e;
+      r.enfermeiro = e.enfermeiro;
+      r.prescricao = reposicao;
+      r.liberadaEm = agora();
+      r.atrasada = false;
+      r.historico.push({ em: agora(), evento: "Liberada para a farm\xE1cia", por: e.enfermeiro });
+      if (nadaARepor) {
+        r.status = "CONFORME";
+        r.concluidaEm = agora();
+        r.historico.push({ em: agora(), evento: "Nada a repor", por: null });
+      } else r.status = "AGUARDANDO_FARMACIA";
+    });
+    this.emitir("enfermagem-liberada", r);
+    if (!nadaARepor) this.emitir("prescricao-recebida", r);
+    return r;
   }
   listar(filtro = {}) {
     let lista = Object.values(this.db.ler().prescricoes);
@@ -283,6 +442,8 @@ var Fluxo = class {
     const r = this.obter(id);
     if (!farmaceutico?.trim()) throw new ErroFluxo(400, ["Informe o farmac\xEAutico."]);
     if (r.status === "CONFORME" || r.status === "COM_PENDENCIAS") throw new ErroFluxo(409, ["Esta prescri\xE7\xE3o j\xE1 foi conferida."]);
+    if (r.status === "AGUARDANDO_ENFERMAGEM" || r.status === "EM_ENFERMAGEM")
+      throw new ErroFluxo(409, ["Aguardando libera\xE7\xE3o da enfermagem."]);
     if (r.status === "EM_CONFERENCIA" && r.farmaceutico !== farmaceutico) {
       const desde = Date.parse(r.inicioConferenciaEm ?? "");
       if (Date.now() - desde < this.op.reservaMinutos * 6e4)
@@ -304,6 +465,8 @@ var Fluxo = class {
     const banco = this.db.ler();
     if (banco.conferencias[c.id]) return r;
     if (r.status === "CONFORME" || r.status === "COM_PENDENCIAS") throw new ErroFluxo(409, ["Esta prescri\xE7\xE3o j\xE1 foi conferida."]);
+    if (r.status === "AGUARDANDO_ENFERMAGEM" || r.status === "EM_ENFERMAGEM")
+      throw new ErroFluxo(409, ["Aguardando libera\xE7\xE3o da enfermagem."]);
     const erros = validarConferencia(c, r.prescricao);
     if (erros.length) throw new ErroFluxo(422, erros);
     this.db.alterar((b) => {
@@ -357,10 +520,12 @@ var Fluxo = class {
     const novas = [];
     this.db.alterar((b) => {
       for (const r of Object.values(b.prescricoes)) {
-        const aberta = r.status === "AGUARDANDO_FARMACIA" || r.status === "EM_CONFERENCIA";
-        if (aberta && !r.atrasada && Date.now() - Date.parse(r.recebidaEm) > limite) {
+        const naEnfermagem = r.status === "AGUARDANDO_ENFERMAGEM" || r.status === "EM_ENFERMAGEM";
+        const naFarmacia = r.status === "AGUARDANDO_FARMACIA" || r.status === "EM_CONFERENCIA";
+        const desde = naEnfermagem ? r.recebidaEm : r.liberadaEm ?? r.recebidaEm;
+        if ((naEnfermagem || naFarmacia) && !r.atrasada && Date.now() - Date.parse(desde) > limite) {
           r.atrasada = true;
-          r.historico.push({ em: agora(), evento: `Passou do prazo de ${this.op.slaMinutos} min`, por: null });
+          r.historico.push({ em: agora(), evento: `Passou do prazo de ${this.op.slaMinutos} min (${naEnfermagem ? "enfermagem" : "farm\xE1cia"})`, por: null });
           novas.push(r);
         }
       }
@@ -375,11 +540,13 @@ var Fluxo = class {
     const concl = lista.filter((r) => r.concluidaEm?.startsWith(hojeStr));
     const tempos = concl.map((r) => (Date.parse(r.concluidaEm) - Date.parse(r.recebidaEm)) / 6e4);
     return {
+      aguardandoEnfermagem: lista.filter((r) => r.status === "AGUARDANDO_ENFERMAGEM").length,
+      emEnfermagem: lista.filter((r) => r.status === "EM_ENFERMAGEM").length,
       aguardando: lista.filter((r) => r.status === "AGUARDANDO_FARMACIA").length,
       emConferencia: lista.filter((r) => r.status === "EM_CONFERENCIA").length,
       concluidasHoje: concl.length,
       comPendenciasHoje: concl.filter((r) => r.status === "COM_PENDENCIAS").length,
-      atrasadas: lista.filter((r) => r.atrasada && (r.status === "AGUARDANDO_FARMACIA" || r.status === "EM_CONFERENCIA")).length,
+      atrasadas: lista.filter((r) => r.atrasada && r.status !== "CONFORME" && r.status !== "COM_PENDENCIAS").length,
       tempoMedioMinutos: tempos.length ? Math.round(tempos.reduce((s, t) => s + t, 0) / tempos.length) : null,
       requisicoesAbertas: b.requisicoes.filter((q) => q.status === "ABERTA").length,
       slaMinutos: this.op.slaMinutos
@@ -433,7 +600,7 @@ data: ${JSON.stringify(dados)}
           return json(res, nova ? 201 : 200, {
             idPrescricao: registro.prescricao.id,
             status: registro.status,
-            mensagem: nova ? "Prescri\xE7\xE3o encaminhada \xE0 farm\xE1cia." : "Prescri\xE7\xE3o j\xE1 recebida."
+            mensagem: !nova ? "Prescri\xE7\xE3o j\xE1 recebida." : registro.status === "AGUARDANDO_ENFERMAGEM" ? "Prescri\xE7\xE3o m\xE9dica finalizada. Enfermagem avisada." : "Prescri\xE7\xE3o encaminhada \xE0 farm\xE1cia."
           });
         }
         if (req.method === "GET" && partes.length === 2) {
@@ -441,6 +608,18 @@ data: ${JSON.stringify(dados)}
           return json(res, 200, fluxo.listar({ status, limite: Number(url.searchParams.get("limite")) || void 0 }));
         }
         if (req.method === "GET" && partes.length === 3) return json(res, 200, fluxo.obter(partes[2]));
+        if (req.method === "POST" && partes[3] === "enfermagem" && partes[4] === "iniciar") {
+          const b = await corpo(req);
+          return json(res, 200, fluxo.iniciarEnfermagem(partes[2], b?.enfermeiro));
+        }
+        if (req.method === "POST" && partes[3] === "enfermagem" && partes.length === 4) {
+          const r = fluxo.liberarEnfermagem(partes[2], await corpo(req));
+          return json(res, 201, {
+            idPrescricao: r.prescricao.id,
+            status: r.status,
+            mensagem: r.status === "CONFORME" ? "Liberado. Nenhum item a repor." : "Liberado para a farm\xE1cia."
+          });
+        }
         if (req.method === "POST" && partes[3] === "assumir") {
           const b = await corpo(req);
           return json(res, 200, fluxo.assumir(partes[2], b.farmaceutico));
@@ -482,7 +661,7 @@ data: ${JSON.stringify(dados)}
       }
       if (req.method === "POST" && partes[1] === "gtins") {
         const b = await corpo(req);
-        const it = itemDoChecklist(b?.descricao);
+        const it = itemDoChecklist2(b?.descricao);
         if (!/^\d{14}$/.test(b?.gtin ?? "") || !it) return json(res, 422, { mensagem: "GTIN ou item inv\xE1lido." });
         db.alterar((d) => d.gtins[b.gtin] = { descricao: b.descricao, opcao: b.opcao ?? null });
         return json(res, 201, { mensagem: "C\xF3digo de barras cadastrado." });

@@ -1,4 +1,4 @@
-import type { ConferenciaReposicao, Indicadores, NomeEvento, PrescricaoCarroEmergencia, RegistroFluxo, RequisicaoCompra, ResultadoEnvio, StatusFluxo } from "./types.js";
+import type { ConferenciaReposicao, Indicadores, NomeEvento, PrescricaoCarroEmergencia, PrescricaoEnfermagem, RegistroFluxo, RequisicaoCompra, ResultadoEnvio, StatusFluxo } from "./types.js";
 export declare const ROTULO_FLUXO: Record<StatusFluxo, string>;
 /** Cliente do serviço de integração (servidor/). Usado pelos três componentes. */
 export declare class ClienteServico {
@@ -11,6 +11,13 @@ export declare class ClienteServico {
     enviarConferencia: (c: ConferenciaReposicao) => Promise<ResultadoEnvio>;
     listar(status?: StatusFluxo[], limite?: number): Promise<RegistroFluxo[]>;
     obter(id: string): Promise<RegistroFluxo | null>;
+    /** Enfermagem reserva a prescrição médica finalizada (409 se não finalizada ou se outro enfermeiro já iniciou). */
+    iniciarEnfermagem(id: string, enfermeiro: string): Promise<{
+        ok: boolean;
+        mensagem?: string;
+        registro?: RegistroFluxo;
+    }>;
+    liberarEnfermagem: (e: PrescricaoEnfermagem) => Promise<ResultadoEnvio>;
     assumir(id: string, farmaceutico: string): Promise<{
         ok: boolean;
         mensagem?: string;

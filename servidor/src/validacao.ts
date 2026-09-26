@@ -1,5 +1,6 @@
 import { CHECKLIST_PADRAO } from "../../src/checklist-padrao.js";
 import { problemaDoLote, TEXTO_PROBLEMA } from "../../src/conferencia-regras.js";
+import { SECOES_MEDICAS } from "../../src/regras-enfermagem.js";
 import type { Checklist, ConferenciaReposicao, ItemChecklist, PrescricaoCarroEmergencia } from "../../src/types.js";
 
 const MOTIVOS = new Set(["SEM_ESTOQUE", "AGUARDANDO_COMPRA", "ITEM_SUSPENSO", "OUTRO"]);
@@ -17,7 +18,9 @@ export function validarPrescricao(p: PrescricaoCarroEmergencia, checklist: Check
   const erros: string[] = [];
   if (p?.tipo !== "PRESCRICAO_CARRO_EMERGENCIA") return ["Corpo não é uma prescrição de carro de emergência."];
   if (!p.id) erros.push("Prescrição sem id.");
-  if (!p.numeroCarro?.trim()) erros.push("Número do carro de parada ausente.");
+  const medica = p.etapa === "MEDICA";
+  if (medica && !p.finalizadaEm) erros.push("Prescrição médica não finalizada.");
+  if (!medica && !p.numeroCarro?.trim()) erros.push("Número do carro de parada ausente.");
   if (!Array.isArray(p.itens) || !p.itens.length) erros.push("Prescrição sem itens.");
   const somas = new Map<string, number>();
   for (const it of p.itens ?? []) {
@@ -26,6 +29,7 @@ export function validarPrescricao(p: PrescricaoCarroEmergencia, checklist: Check
       erros.push(`Item fora do check list: ${it.descricao}.`);
       continue;
     }
+    if (medica && !SECOES_MEDICAS.includes(it.secao)) erros.push(`${it.descricao} não é prescrição médica (materiais são da enfermagem).`);
     if (!Number.isInteger(it.quantidade) || it.quantidade < 1) erros.push(`Quantidade inválida em ${it.descricao}.`);
     if (ref.opcoes && (!it.opcao || !ref.opcoes.includes(it.opcao))) erros.push(`Opção inválida em ${it.descricao}.`);
     somas.set(it.descricao, (somas.get(it.descricao) ?? 0) + it.quantidade);

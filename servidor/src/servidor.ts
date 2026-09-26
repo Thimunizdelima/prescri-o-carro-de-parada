@@ -74,7 +74,9 @@ export function criarServidor(db: Armazenamento, opcoes = { slaMinutos: SLA, res
           const { registro, nova } = fluxo.receberPrescricao(await corpo(req));
           return json(res, nova ? 201 : 200, {
             idPrescricao: registro.prescricao.id, status: registro.status,
-            mensagem: nova ? "Prescrição encaminhada à farmácia." : "Prescrição já recebida.",
+            mensagem: !nova ? "Prescrição já recebida."
+              : registro.status === "AGUARDANDO_ENFERMAGEM" ? "Prescrição médica finalizada. Enfermagem avisada."
+              : "Prescrição encaminhada à farmácia.",
           });
         }
         if (req.method === "GET" && partes.length === 2) {
@@ -82,6 +84,17 @@ export function criarServidor(db: Armazenamento, opcoes = { slaMinutos: SLA, res
           return json(res, 200, fluxo.listar({ status, limite: Number(url.searchParams.get("limite")) || undefined }));
         }
         if (req.method === "GET" && partes.length === 3) return json(res, 200, fluxo.obter(partes[2]));
+        if (req.method === "POST" && partes[3] === "enfermagem" && partes[4] === "iniciar") {
+          const b = await corpo<{ enfermeiro: string }>(req);
+          return json(res, 200, fluxo.iniciarEnfermagem(partes[2], b?.enfermeiro));
+        }
+        if (req.method === "POST" && partes[3] === "enfermagem" && partes.length === 4) {
+          const r = fluxo.liberarEnfermagem(partes[2], await corpo(req));
+          return json(res, 201, {
+            idPrescricao: r.prescricao.id, status: r.status,
+            mensagem: r.status === "CONFORME" ? "Liberado. Nenhum item a repor." : "Liberado para a farmácia.",
+          });
+        }
         if (req.method === "POST" && partes[3] === "assumir") {
           const b = await corpo<{ farmaceutico: string }>(req);
           return json(res, 200, fluxo.assumir(partes[2], b.farmaceutico));

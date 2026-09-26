@@ -20,6 +20,7 @@ export declare const CANAL_PADRAO = "carro-emergencia";
  *   setor          Setor onde o carro foi usado.
  *   numero-carro   Pré-preenche o número do carro de parada.
  *   checklist-url  URL de um JSON com outro check list (mesmo formato de CHECKLIST_PADRAO).
+ *   modo           "medico": prescrição médica (só medicamentos). Ao finalizar, libera a prescrição de enfermagem.
  *   servidor       URL do serviço de integração (servidor/). Envia a prescrição e acompanha a farmácia em tempo real.
  *   token          Token do serviço, se exigido.
  *   canal          Nome do BroadcastChannel que avisa a conferência da farmácia (padrão "carro-emergencia"; "off" desliga).
@@ -69,6 +70,11 @@ export declare class PrescricaoCarroEmergenciaElement extends HTMLElement {
     private atualizarResumo;
     private pedirConfirmacao;
     private ultima;
+    private confirmando;
+    private finalizada;
+    /** modo="medico": só medicamentos, sem lacres; "Finalizar" libera a enfermagem. */
+    private get modoMedico();
+    private get rotuloBotao();
     private pararEscuta;
     /** Cliente do serviço de integração, quando o atributo `servidor` está definido. */
     private get cliente();

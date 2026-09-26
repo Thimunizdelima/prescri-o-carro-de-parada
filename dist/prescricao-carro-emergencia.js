@@ -200,6 +200,8 @@ function criarEnvioHttp(cfg) {
 
 // src/integracao.ts
 var ROTULO_FLUXO = {
+  AGUARDANDO_ENFERMAGEM: "Aguardando enfermagem",
+  EM_ENFERMAGEM: "Em checagem pela enfermagem",
   AGUARDANDO_FARMACIA: "Aguardando farm\xE1cia",
   EM_CONFERENCIA: "Em confer\xEAncia",
   CONFORME: "Reposto",
@@ -211,6 +213,7 @@ var ClienteServico = class {
     this.token = token;
     this.enviarPrescricao = (p) => this.envio("/api/prescricoes", p);
     this.enviarConferencia = (c) => this.envio("/api/conferencias", c);
+    this.liberarEnfermagem = (e) => this.envio(`/api/prescricoes/${encodeURIComponent(e.prescricaoMedicaId)}/enfermagem`, e);
     this.base = base.replace(/\/+$/, "");
   }
   async pedir(metodo, caminho, corpo) {
@@ -244,6 +247,11 @@ var ClienteServico = class {
     const r = await this.pedir("GET", `/api/prescricoes/${encodeURIComponent(id)}`);
     return r.ok ? r.dados : null;
   }
+  /** Enfermagem reserva a prescrição médica finalizada (409 se não finalizada ou se outro enfermeiro já iniciou). */
+  async iniciarEnfermagem(id, enfermeiro) {
+    const r = await this.pedir("POST", `/api/prescricoes/${encodeURIComponent(id)}/enfermagem/iniciar`, { enfermeiro });
+    return { ok: r.ok, mensagem: r.dados?.mensagem, registro: r.ok ? r.dados : void 0 };
+  }
   async assumir(id, farmaceutico) {
     const r = await this.pedir("POST", `/api/prescricoes/${encodeURIComponent(id)}/assumir`, { farmaceutico });
     return { ok: r.ok, mensagem: r.dados?.mensagem };
@@ -272,11 +280,143 @@ var ClienteServico = class {
     };
     const es = new EventSource(this.base + "/api/eventos", { withCredentials: true });
     if (aoConectar) es.onopen = () => aoConectar();
-    const nomes = ["prescricao-recebida", "conferencia-iniciada", "conferencia-concluida", "alerta-sla"];
+    const nomes = [
+      "prescricao-medica-finalizada",
+      "enfermagem-iniciada",
+      "enfermagem-liberada",
+      "prescricao-recebida",
+      "conferencia-iniciada",
+      "conferencia-concluida",
+      "alerta-sla"
+    ];
     for (const n of nomes) es.addEventListener(n, (e) => fn(n, JSON.parse(e.data)));
     return () => es.close();
   }
 };
+
+// src/regras-enfermagem.ts
+var SECOES_MEDICAS = ["Medicamentos", "Especificidades", "Kits", "Solu\xE7\xF5es"];
+var SECOES_MATERIAIS = ["Materiais", "Materiais CME"];
+var TEXTO_PERDA = {
+  QUEBRA: "Quebra",
+  DILUIDO_NAO_UTILIZADO: "Dilu\xEDdo e n\xE3o utilizado",
+  CONTAMINADO: "Contaminado",
+  OUTRO: "Outro"
+};
+var TEXTO_NAO_ADMINISTRADO = {
+  SUSPENSO_PELO_MEDICO: "Suspenso pelo m\xE9dico",
+  EVOLUCAO_DO_PACIENTE: "Evolu\xE7\xE3o do paciente",
+  OUTRO: "Outro"
+};
+var CUIDADOS_PADRAO = [
+  { descricao: "Monitoriza\xE7\xE3o card\xEDaca cont\xEDnua", frequencia: "Cont\xEDnuo" },
+  { descricao: "Oximetria de pulso cont\xEDnua", frequencia: "Cont\xEDnuo" },
+  { descricao: "Sinais vitais", frequencia: "15/15 min na 1\xAA hora" },
+  { descricao: "Glicemia capilar", frequencia: "Conforme protocolo" },
+  { descricao: "Controle de temperatura", frequencia: "2/2 h" },
+  { descricao: "Cabeceira elevada a 30\xB0", frequencia: "Cont\xEDnuo" },
+  { descricao: "Controle de diurese", frequencia: "1/1 h" },
+  { descricao: "Registrar evolu\xE7\xE3o de enfermagem p\xF3s-PCR", frequencia: "Ao t\xE9rmino" }
+];
+var REGRA_BLOQUEIO = "A prescri\xE7\xE3o de enfermagem somente pode ser iniciada ap\xF3s a finaliza\xE7\xE3o da prescri\xE7\xE3o m\xE9dica.";
+function medicaFinalizada(p) {
+  return !!p && p.etapa === "MEDICA" && !!p.finalizadaEm;
+}
+function itemDoChecklist(descricao, checklist = CHECKLIST_PADRAO) {
+  for (const s of checklist) for (const i of s.itens) if (i.descricao === descricao) return i;
+  return void 0;
+}
+function checagemInicial(medica) {
+  return medica.itens.map((i) => ({
+    secao: i.secao,
+    codigo: i.codigo,
+    descricao: i.descricao,
+    opcao: i.opcao,
+    unidade: i.unidade,
+    prescrito: i.quantidade,
+    administrado: i.quantidade,
+    horario: null,
+    naoAdministrado: null,
+    perda: null
+  }));
+}
+var consumo = (c) => c.administrado + (c.perda?.quantidade ?? 0);
+function validarEnfermagem(e, medica, checklist = CHECKLIST_PADRAO) {
+  const erros = [];
+  if (!medicaFinalizada(medica)) return [REGRA_BLOQUEIO];
+  if (e?.tipo !== "PRESCRICAO_ENFERMAGEM_CARRO") return ["Corpo n\xE3o \xE9 uma prescri\xE7\xE3o de enfermagem."];
+  if (e.prescricaoMedicaId !== medica.id) erros.push("A prescri\xE7\xE3o de enfermagem n\xE3o corresponde a esta prescri\xE7\xE3o m\xE9dica.");
+  if (!e.enfermeiro?.trim()) erros.push("Informe o enfermeiro respons\xE1vel.");
+  if (!e.numeroCarro?.trim()) erros.push("Informe o n\xFAmero do carro de parada.");
+  if (!e.lacreRompido?.trim()) erros.push("Informe o lacre rompido.");
+  const chave = (d, o) => `${d}|${o ?? ""}`;
+  const porChave = new Map(e.checagem.map((c) => [chave(c.descricao, c.opcao), c]));
+  const somaCarro = /* @__PURE__ */ new Map();
+  for (const it of medica.itens) {
+    const nome = `${it.descricao}${it.opcao ? " \u2014 " + it.opcao : ""}`;
+    const c = porChave.get(chave(it.descricao, it.opcao));
+    if (!c) {
+      erros.push(`Faltou checar ${nome}.`);
+      continue;
+    }
+    if (c.prescrito !== it.quantidade) erros.push(`${nome}: quantidade prescrita divergente.`);
+    if (!Number.isInteger(c.administrado) || c.administrado < 0 || c.administrado > it.quantidade)
+      erros.push(`${nome}: administrado deve ficar entre 0 e ${it.quantidade}.`);
+    if (c.administrado < it.quantidade && !c.naoAdministrado?.motivo)
+      erros.push(`${nome}: informe o motivo de n\xE3o ter administrado ${it.quantidade - c.administrado}.`);
+    if (c.perda && (!Number.isInteger(c.perda.quantidade) || c.perda.quantidade < 1 || !c.perda.motivo))
+      erros.push(`${nome}: informe quantidade e motivo da perda.`);
+    somaCarro.set(it.descricao, (somaCarro.get(it.descricao) ?? 0) + consumo(c));
+  }
+  if (e.checagem.length !== medica.itens.length) erros.push("A checagem tem itens que n\xE3o est\xE3o na prescri\xE7\xE3o m\xE9dica.");
+  for (const m of e.materiais ?? []) {
+    const ref = itemDoChecklist(m.descricao, checklist);
+    if (!ref || !SECOES_MATERIAIS.includes(m.secao)) {
+      erros.push(`Material fora do check list: ${m.descricao}.`);
+      continue;
+    }
+    if (!Number.isInteger(m.quantidade) || m.quantidade < 1) erros.push(`Quantidade inv\xE1lida em ${m.descricao}.`);
+    if (ref.opcoes && (!m.opcao || !ref.opcoes.includes(m.opcao))) erros.push(`Escolha a op\xE7\xE3o utilizada em ${m.descricao}.`);
+    somaCarro.set(m.descricao, (somaCarro.get(m.descricao) ?? 0) + m.quantidade);
+  }
+  for (const [d, soma] of somaCarro) {
+    const max = itemDoChecklist(d, checklist)?.maximo;
+    if (max !== void 0 && soma > max) erros.push(`${d}: sa\xEDda do carro (${soma}) ultrapassa o quantitativo do check list (${max}).`);
+  }
+  return erros;
+}
+function montarReposicao(medica, e) {
+  const itens = [];
+  const notas = [];
+  for (const c of e.checagem) {
+    const nome = `${c.descricao}${c.opcao ? " \u2014 " + c.opcao : ""}`;
+    if (c.perda) notas.push(`Perda: ${c.perda.quantidade} ${c.unidade} de ${nome} (${TEXTO_PERDA[c.perda.motivo]}${c.perda.observacao ? ": " + c.perda.observacao : ""}).`);
+    if (c.administrado < c.prescrito && c.naoAdministrado)
+      notas.push(`N\xE3o administrado: ${c.prescrito - c.administrado} ${c.unidade} de ${nome} (${TEXTO_NAO_ADMINISTRADO[c.naoAdministrado.motivo]}) \u2014 retorna ao carro.`);
+    const q = consumo(c);
+    if (q > 0) {
+      const ref = itemDoChecklist(c.descricao);
+      itens.push({ secao: c.secao, codigo: c.codigo, descricao: c.descricao, opcao: c.opcao, quantidade: q, unidade: c.unidade, quantitativoPrevisto: ref?.maximo ?? q });
+    }
+  }
+  itens.push(...e.materiais);
+  const justificativa = [e.justificativa?.trim(), ...notas].filter(Boolean).join("\n") || null;
+  return {
+    tipo: "PRESCRICAO_CARRO_EMERGENCIA",
+    versao: 1,
+    etapa: "REPOSICAO",
+    id: medica.id,
+    dataHora: e.dataHora,
+    numeroCarro: e.numeroCarro,
+    lacreRompido: e.lacreRompido,
+    lacreNovo: e.lacreNovo,
+    contexto: { ...medica.contexto, enfermeiro: e.enfermeiro },
+    itens,
+    justificativa,
+    finalizadaEm: medica.finalizadaEm,
+    medico: medica.medico ?? medica.contexto?.prescritor ?? null
+  };
+}
 
 // src/regras.ts
 function normalizarLinhas(item, linhas) {
@@ -354,6 +494,7 @@ var PrescricaoCarroEmergenciaElement = class extends HTMLElement {
       const acao = btn.dataset.acao;
       if (acao === "gerar") return void this.gerar();
       if (acao === "limpar") return this.pedirConfirmacao();
+      if (acao === "nova") return this.limpar();
       if (acao === "copiar" || acao === "copiar-json") return void this.copiar(btn, acao === "copiar-json");
       const l = this.linhaDe(btn);
       if (!l) return;
@@ -372,6 +513,8 @@ var PrescricaoCarroEmergenciaElement = class extends HTMLElement {
       }
     };
     this.ultima = null;
+    this.confirmando = false;
+    this.finalizada = false;
     this.pararEscuta = null;
     this.root = this.attachShadow({ mode: "open" });
     this.root.addEventListener("change", (e) => this.aoMudar(e));
@@ -406,13 +549,17 @@ var PrescricaoCarroEmergenciaElement = class extends HTMLElement {
   }
   limpar() {
     this.uso.clear();
+    this.finalizada = false;
+    this.confirmando = false;
+    this.pararEscuta?.();
     this.renderizar();
   }
   obterPrescricao() {
     const pend = [];
-    const numeroCarro = this.campo("numeroCarro").value.trim();
-    if (!numeroCarro) pend.push("Preencha o n\xFAmero do carro de parada.");
-    if (!this.uso.size) pend.push("Marque pelo menos um item utilizado.");
+    const medico = this.modoMedico;
+    const numeroCarro = (this.campo("numeroCarro")?.value ?? this.getAttribute("numero-carro") ?? "").trim();
+    if (!numeroCarro && !medico) pend.push("Preencha o n\xFAmero do carro de parada.");
+    if (!this.uso.size) pend.push(medico ? "Marque pelo menos um medicamento administrado." : "Marque pelo menos um item utilizado.");
     const semOpcao = this.linhas.filter((l) => l.item.opcoes && this.uso.get(l.chave)?.some((u) => !u.opcao)).map((l) => l.item.descricao);
     if (semOpcao.length) pend.push(`Escolha a op\xE7\xE3o utilizada em: ${semOpcao.join(", ")}.`);
     if (pend.length) throw new ErroValidacao(pend);
@@ -436,17 +583,19 @@ var PrescricaoCarroEmergenciaElement = class extends HTMLElement {
       prescritor: this.getAttribute("prescritor"),
       setor: this.getAttribute("setor")
     };
+    const agora = (/* @__PURE__ */ new Date()).toISOString();
     return {
       tipo: "PRESCRICAO_CARRO_EMERGENCIA",
       versao: 1,
       id: novoId(),
-      dataHora: (/* @__PURE__ */ new Date()).toISOString(),
+      dataHora: agora,
       numeroCarro,
-      lacreRompido: this.campo("lacreRompido").value.trim() || null,
-      lacreNovo: this.campo("lacreNovo").value.trim() || null,
+      lacreRompido: this.campo("lacreRompido")?.value.trim() || null,
+      lacreNovo: this.campo("lacreNovo")?.value.trim() || null,
       contexto,
       itens,
-      justificativa: this.campo("justificativa").value.trim() || null
+      justificativa: this.campo("justificativa").value.trim() || null,
+      ...medico ? { etapa: "MEDICA", finalizadaEm: agora, medico: this.getAttribute("prescritor") } : {}
     };
   }
   async gerar() {
@@ -454,6 +603,7 @@ var PrescricaoCarroEmergenciaElement = class extends HTMLElement {
     const rx = this.$(".rx");
     const botao = this.$("#gerar");
     msg.classList.remove("erro");
+    if (this.finalizada) return;
     let p;
     try {
       p = this.obterPrescricao();
@@ -461,8 +611,17 @@ var PrescricaoCarroEmergenciaElement = class extends HTMLElement {
       msg.textContent = e instanceof ErroValidacao ? e.pendencias.join(" ") : String(e);
       msg.classList.add("erro");
       rx.hidden = true;
+      this.confirmando = false;
+      botao.textContent = this.rotuloBotao;
       return;
     }
+    if (this.modoMedico && !this.confirmando) {
+      this.confirmando = true;
+      botao.textContent = "Confirmar finaliza\xE7\xE3o";
+      msg.textContent = `${p.itens.length} ${p.itens.length === 1 ? "item" : "itens"}. Depois de finalizada, a prescri\xE7\xE3o n\xE3o pode ser alterada e a enfermagem \xE9 liberada para iniciar. Clique de novo para confirmar.`;
+      return;
+    }
+    this.confirmando = false;
     const canal = this.getAttribute("canal") ?? CANAL_PADRAO;
     if (canal !== "off" && typeof BroadcastChannel !== "undefined") {
       try {
@@ -502,10 +661,16 @@ var PrescricaoCarroEmergenciaElement = class extends HTMLElement {
           this.emitir("prescricao-erro", { prescricao: p, erro: e });
         } finally {
           botao.disabled = false;
-          botao.textContent = "Gerar Prescri\xE7\xE3o";
+          botao.textContent = this.rotuloBotao;
         }
       }
     }
+    if (this.modoMedico && !erro) {
+      this.finalizada = true;
+      this.root.querySelectorAll("input, select, textarea, button[data-acao]:not([data-acao^='copiar'])").forEach((el) => el.disabled = true);
+      botao.textContent = "Prescri\xE7\xE3o m\xE9dica finalizada";
+      status = `${status} A prescri\xE7\xE3o de enfermagem j\xE1 pode ser iniciada.`;
+    } else botao.textContent = this.rotuloBotao;
     this.mostrarPrescricao(p, status, erro);
     if (!erro && this.cliente) this.acompanhar(p.id);
     msg.textContent = `Prescri\xE7\xE3o gerada com ${p.itens.length} ${p.itens.length === 1 ? "linha" : "linhas"}.`;
@@ -531,7 +696,9 @@ var PrescricaoCarroEmergenciaElement = class extends HTMLElement {
   }
   renderizar() {
     this.linhas = [];
+    const medico = this.modoMedico;
     const secoes = this._checklist.map((sec, si) => {
+      if (medico && !SECOES_MEDICAS.includes(sec.titulo)) return "";
       const trs = sec.itens.map((item, ii) => {
         const chave = `${si}_${ii}`;
         this.linhas.push({
@@ -548,18 +715,20 @@ var PrescricaoCarroEmergenciaElement = class extends HTMLElement {
       return `<section><h2>${esc(sec.titulo)}<small>${sec.itens.length} itens</small></h2>
         <table><thead><tr><th>Item</th><th class="dir">Utilizado</th></tr></thead><tbody>${trs}</tbody></table></section>`;
     });
-    const total = this._checklist.reduce((s, sec) => s + sec.itens.length, 0);
+    const visiveis = this._checklist.filter((s) => !medico || SECOES_MEDICAS.includes(s.titulo));
+    const html = secoes.filter(Boolean);
+    const total = visiveis.reduce((s, sec) => s + sec.itens.length, 0);
     let meio = 0;
-    for (let acc = 0, melhor = Infinity, i = 0; i <= this._checklist.length; i++) {
+    for (let acc = 0, melhor = Infinity, i = 0; i <= visiveis.length; i++) {
       const dif = Math.abs(total - 2 * acc);
       if (dif < melhor) [melhor, meio] = [dif, i];
-      acc += this._checklist[i]?.itens.length ?? 0;
+      acc += visiveis[i]?.itens.length ?? 0;
     }
     const numero = esc(this.getAttribute("numero-carro") ?? "");
     this.root.innerHTML = `<style>${ESTILOS}</style>
       <div class="wrap">
         <div class="topo">
-          <h1>Formul\xE1rio de Prescri\xE7\xE3o de Carro de Emerg\xEAncia</h1>
+          <h1>${medico ? "Prescri\xE7\xE3o M\xE9dica \xB7 Carro de Emerg\xEAncia" : "Formul\xE1rio de Prescri\xE7\xE3o de Carro de Emerg\xEAncia"}</h1>
           <input type="search" id="busca" placeholder="Buscar item\u2026" aria-label="Buscar item">
         </div>
         <div class="resumo" aria-live="polite">
@@ -568,20 +737,20 @@ var PrescricaoCarroEmergenciaElement = class extends HTMLElement {
           <span class="esp"></span>
           <span id="caixaLimpar"><button class="perigo" type="button" data-acao="limpar">Limpar tudo</button></span>
         </div>
-        <div class="campos">
+        ${medico ? "" : `<div class="campos">
           <label for="numeroCarro">N\xFAmero do carro de parada<input id="numeroCarro" type="text" inputmode="numeric" value="${numero}" required></label>
           <label for="lacreRompido">Lacre rompido<input id="lacreRompido" type="text" inputmode="numeric"></label>
           <label for="lacreNovo">Lacre novo<input id="lacreNovo" type="text" inputmode="numeric"></label>
-        </div>
-        <div class="grade"><div class="col">${secoes.slice(0, meio).join("")}</div><div class="col">${secoes.slice(meio).join("")}</div></div>
+        </div>`}
+        <div class="grade"><div class="col">${html.slice(0, meio).join("")}</div><div class="col">${html.slice(meio).join("")}</div></div>
         <div class="just">
-          <label for="justificativa">Justificativa</label>
-          <small>Use em caso de quebra de medicamento ou de medicamento dilu\xEDdo e n\xE3o utilizado.</small>
-          <textarea id="justificativa" placeholder="Descreva o ocorrido (opcional)"></textarea>
+          <label for="justificativa">${medico ? "Observa\xE7\xF5es m\xE9dicas" : "Justificativa"}</label>
+          <small>${medico ? "Opcional. Materiais, lacres e perdas s\xE3o registrados pela enfermagem." : "Use em caso de quebra de medicamento ou de medicamento dilu\xEDdo e n\xE3o utilizado."}</small>
+          <textarea id="justificativa" placeholder="${medico ? "Observa\xE7\xF5es (opcional)" : "Descreva o ocorrido (opcional)"}"></textarea>
         </div>
         <div class="gerar">
-          <span class="msg" aria-live="polite">Ao terminar de marcar os itens utilizados, gere a prescri\xE7\xE3o.</span>
-          <button class="primario grande" id="gerar" type="button" data-acao="gerar">Gerar Prescri\xE7\xE3o</button>
+          <span class="msg" aria-live="polite">${medico ? "Marque os medicamentos administrados na parada e finalize a prescri\xE7\xE3o." : "Ao terminar de marcar os itens utilizados, gere a prescri\xE7\xE3o."}</span>
+          <button class="primario grande" id="gerar" type="button" data-acao="gerar">${this.rotuloBotao}</button>
         </div>
         <section class="rx" hidden></section>
       </div>`;
@@ -637,6 +806,13 @@ var PrescricaoCarroEmergenciaElement = class extends HTMLElement {
       voltar();
     });
   }
+  /** modo="medico": só medicamentos, sem lacres; "Finalizar" libera a enfermagem. */
+  get modoMedico() {
+    return this.getAttribute("modo") === "medico";
+  }
+  get rotuloBotao() {
+    return this.modoMedico ? "Finalizar prescri\xE7\xE3o m\xE9dica" : "Gerar Prescri\xE7\xE3o";
+  }
   /** Cliente do serviço de integração, quando o atributo `servidor` está definido. */
   get cliente() {
     const s = this.getAttribute("servidor");
@@ -648,28 +824,32 @@ var PrescricaoCarroEmergenciaElement = class extends HTMLElement {
     if (!el) return;
     const mostrar = (txt) => {
       el.hidden = false;
-      el.innerHTML = `<strong>Situa\xE7\xE3o na farm\xE1cia:</strong> ${txt}`;
+      el.innerHTML = `<strong>Andamento:</strong> ${txt}`;
     };
-    mostrar(ROTULO_FLUXO.AGUARDANDO_FARMACIA);
+    mostrar(this.modoMedico ? ROTULO_FLUXO.AGUARDANDO_ENFERMAGEM : ROTULO_FLUXO.AGUARDANDO_FARMACIA);
     this.pararEscuta?.();
     const cli = this.cliente;
+    const rotulo = (reg) => {
+      let t = ROTULO_FLUXO[reg.status];
+      if (reg.status === "EM_ENFERMAGEM" && reg.enfermeiro) t += ` por ${esc(reg.enfermeiro)}`;
+      if (reg.status === "AGUARDANDO_FARMACIA" && reg.enfermeiro) t += ` \xB7 liberado por ${esc(reg.enfermeiro)}`;
+      if (reg.status === "EM_CONFERENCIA" && reg.farmaceutico) t += ` por ${esc(reg.farmaceutico)}`;
+      if (reg.atrasada && reg.status !== "CONFORME" && reg.status !== "COM_PENDENCIAS") t += " \xB7 passou do prazo";
+      return t;
+    };
     const reler = async () => {
       const reg = await cli.obter(id);
-      if (!reg) return;
-      if (reg.status === "EM_CONFERENCIA") mostrar(`${ROTULO_FLUXO.EM_CONFERENCIA} por ${esc(reg.farmaceutico)}${reg.atrasada ? " \xB7 passou do prazo" : ""}`);
-      else if (reg.status !== "AGUARDANDO_FARMACIA") mostrar(ROTULO_FLUXO[reg.status]);
+      if (reg) mostrar(rotulo(reg));
     };
     this.pararEscuta = cli.ouvir((evento, dados) => {
       const reg = evento === "conferencia-concluida" ? dados.registro : dados;
       if (reg?.prescricao?.id !== id) return;
-      if (evento === "conferencia-iniciada") mostrar(`${ROTULO_FLUXO.EM_CONFERENCIA} por ${esc(reg.farmaceutico)}`);
-      if (evento === "alerta-sla") mostrar(`${ROTULO_FLUXO[reg.status]} \xB7 passou do prazo`);
       if (evento === "conferencia-concluida") {
         const falt = (dados.conferencia?.itens ?? []).filter((i) => i.falta).length;
         mostrar(`${ROTULO_FLUXO[reg.status]}${falt ? ` (${falt} ${falt === 1 ? "item em falta" : "itens em falta"})` : ""} \xB7 lacre ${esc(dados.conferencia?.lacreAplicado ?? "\u2014")}`);
         this.pararEscuta?.();
         this.pararEscuta = null;
-      }
+      } else mostrar(rotulo(reg));
     }, () => void reler());
   }
   disconnectedCallback() {
@@ -695,7 +875,8 @@ var PrescricaoCarroEmergenciaElement = class extends HTMLElement {
       <div class="bloco status${erro ? " erro" : ""}">${status}</div>
       <div class="bloco" id="acomp" hidden></div>
       <div class="bloco"><button type="button" class="primario" data-acao="copiar">Copiar prescri\xE7\xE3o</button>
-        <button type="button" data-acao="copiar-json">Copiar dados (JSON)</button></div>`;
+        <button type="button" data-acao="copiar-json">Copiar dados (JSON)</button>
+        ${this.modoMedico ? `<button type="button" data-acao="nova">Nova prescri\xE7\xE3o m\xE9dica</button>` : ""}</div>`;
     rx.hidden = false;
     rx.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
   }
@@ -871,7 +1052,7 @@ var EXTRA = (
 .meta div{display:flex;flex-direction:column;gap:2px}
 .meta small{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--pce-suave);font-weight:600}
 .meta strong{font-weight:600}
-.alerta{border-left:4px solid var(--pce-alerta);background:var(--pce-alerta-fundo);border-radius:6px;padding:10px 14px;font-size:14px}
+.alerta{white-space:pre-line;border-left:4px solid var(--pce-alerta);background:var(--pce-alerta-fundo);border-radius:6px;padding:10px 14px;font-size:14px}
 .leitor{display:flex;flex-direction:column;gap:8px;background:var(--pce-superficie);border:2px solid var(--pce-primaria);border-radius:10px;padding:14px 16px}
 .leitor label{font-weight:600;color:var(--pce-secundaria)}
 .leitor input{font:600 18px ui-monospace,"IBM Plex Mono",monospace;padding:12px 14px;border:1px solid var(--pce-linha);border-radius:8px;width:100%}
@@ -1019,6 +1200,7 @@ var ConferenciaFarmaciaElement = class extends HTMLElement {
   }
   receber(p) {
     if (p?.tipo !== "PRESCRICAO_CARRO_EMERGENCIA") return;
+    if (p.etapa === "MEDICA") return;
     if (this._p?.id === p.id || this.abrindo.has(p.id) || this.fila.some((f) => f.id === p.id)) return;
     if (!this._p || this.concluida) {
       void this.abrir(p).then((ok) => ok && this.avisar(`Prescri\xE7\xE3o do carro n\xBA ${p.numeroCarro} carregada.`, "ok"));
@@ -1288,9 +1470,9 @@ var ConferenciaFarmaciaElement = class extends HTMLElement {
     let corpo;
     if (!p) {
       corpo = `<div class="card vazio">
-        <strong>Aguardando prescri\xE7\xE3o.</strong>
+        <strong>Aguardando libera\xE7\xE3o da enfermagem.</strong>
         <div class="fb" id="fb" aria-live="polite"></div>
-        <span class="msg">As prescri\xE7\xF5es geradas no formul\xE1rio do carro chegam aqui automaticamente. Voc\xEA tamb\xE9m pode colar o JSON da prescri\xE7\xE3o abaixo.</span>
+        <span class="msg">As reposi\xE7\xF5es liberadas pela enfermagem chegam aqui automaticamente. Voc\xEA tamb\xE9m pode colar o JSON da prescri\xE7\xE3o abaixo.</span>
         <textarea id="json" aria-label="JSON da prescri\xE7\xE3o" placeholder='{"tipo":"PRESCRICAO_CARRO_EMERGENCIA", ...}'></textarea>
         <div><button class="primario" type="button" data-acao="colar">Carregar prescri\xE7\xE3o</button></div>
       </div>`;
@@ -1301,14 +1483,15 @@ var ConferenciaFarmaciaElement = class extends HTMLElement {
         ["Prescri\xE7\xE3o", dataBr(p.dataHora)],
         ["Paciente", c.paciente],
         ["Atendimento", c.atendimento],
-        ["Prescritor", c.prescritor],
+        ["M\xE9dico", p.medico ?? c.prescritor],
+        ["Enfermeiro", c.enfermeiro],
         ["Setor", c.setor],
         ["Lacre rompido", p.lacreRompido],
         ["Lacre novo (enfermagem)", p.lacreNovo]
       ].filter(([, v]) => v).map(([k, v]) => `<div><small>${k}</small><strong>${esc2(v)}</strong></div>`).join("");
       corpo = `
         <div class="card meta">${meta}</div>
-        ${p.justificativa ? `<div class="alerta"><strong>Justificativa da enfermagem:</strong> ${esc2(p.justificativa)}</div>` : ""}
+        ${p.justificativa ? `<div class="alerta"><strong>Observa\xE7\xF5es e perdas (enfermagem):</strong> ${esc2(p.justificativa)}</div>` : ""}
         <div class="leitor">
           <label for="leitor">Bipe o c\xF3digo de barras (DataMatrix ou EAN) de cada unidade separada</label>
           <input id="leitor" autocomplete="off" spellcheck="false" placeholder="Aguardando leitura\u2026">
@@ -1624,6 +1807,8 @@ var decorrido = (desde, ate) => {
   return min < 60 ? `${min} min` : `${Math.floor(min / 60)} h ${String(min % 60).padStart(2, "0")}`;
 };
 var COR = {
+  AGUARDANDO_ENFERMAGEM: "PENDENTE",
+  EM_ENFERMAGEM: "PARCIAL",
   AGUARDANDO_FARMACIA: "PENDENTE",
   EM_CONFERENCIA: "PARCIAL",
   CONFORME: "CONFERIDO",
@@ -1700,7 +1885,7 @@ var PainelCarroEmergenciaElement = class extends HTMLElement {
     const kpi = (rot, v, alerta = false) => `<div class="kpi${alerta ? " alerta" : ""}"><small>${rot}</small><strong>${v}</strong></div>`;
     const linhas = this.regs.map((r) => {
       const p = r.prescricao;
-      const aberta = r.status === "AGUARDANDO_FARMACIA" || r.status === "EM_CONFERENCIA";
+      const aberta = r.status !== "CONFORME" && r.status !== "COM_PENDENCIAS";
       return `<tr class="${r.atrasada && aberta ? "atrasada" : ""}">
           <td><span class="chip ${COR[r.status]}">${ROTULO_FLUXO[r.status]}</span></td>
           <td class="n">n\xBA ${esc3(p.numeroCarro)}</td>
@@ -1708,6 +1893,7 @@ var PainelCarroEmergenciaElement = class extends HTMLElement {
           <td class="n">${p.itens.length} ${p.itens.length === 1 ? "item" : "itens"}</td>
           <td class="n">${hora(r.recebidaEm)}</td>
           <td class="n ${r.atrasada && aberta ? "atraso" : ""}">${decorrido(r.recebidaEm, r.concluidaEm)}${r.atrasada && aberta ? " \xB7 atrasada" : ""}</td>
+          <td>${esc3(r.enfermeiro ?? "\u2014")}</td>
           <td>${esc3(r.farmaceutico ?? "\u2014")}</td></tr>`;
     }).join("");
     const reqs = this.reqs.map(
@@ -1720,6 +1906,7 @@ var PainelCarroEmergenciaElement = class extends HTMLElement {
         <div class="topo"><h1>Painel do Carro de Emerg\xEAncia</h1>
           <span class="ao-vivo${this.conectado ? "" : " off"}">${this.conectado ? "Ao vivo" : "Sem conex\xE3o com o servi\xE7o"}</span></div>
         <div class="kpis">
+          ${kpi("Aguardando enfermagem", i ? i.aguardandoEnfermagem + i.emEnfermagem : "\u2014")}
           ${kpi("Aguardando farm\xE1cia", i?.aguardando ?? "\u2014")}
           ${kpi("Em confer\xEAncia", i?.emConferencia ?? "\u2014")}
           ${kpi(`Atrasadas (> ${i?.slaMinutos ?? "\u2014"} min)`, i?.atrasadas ?? "\u2014", !!i?.atrasadas)}
@@ -1729,8 +1916,8 @@ var PainelCarroEmergenciaElement = class extends HTMLElement {
         </div>
         <h2 class="sub">Prescri\xE7\xF5es recentes</h2>
         <div class="tabela"><table>
-          <thead><tr><th>Situa\xE7\xE3o</th><th>Carro</th><th>Paciente</th><th>Itens</th><th>Recebida</th><th>Tempo</th><th>Farmac\xEAutico</th></tr></thead>
-          <tbody>${linhas || `<tr><td colspan="7">Nenhuma prescri\xE7\xE3o ainda.</td></tr>`}</tbody></table></div>
+          <thead><tr><th>Situa\xE7\xE3o</th><th>Carro</th><th>Paciente</th><th>Itens</th><th>Recebida</th><th>Tempo</th><th>Enfermeiro</th><th>Farmac\xEAutico</th></tr></thead>
+          <tbody>${linhas || `<tr><td colspan="8">Nenhuma prescri\xE7\xE3o ainda.</td></tr>`}</tbody></table></div>
         <h2 class="sub">Requisi\xE7\xF5es de compra abertas (faltas)</h2>
         <div class="tabela"><table>
           <thead><tr><th>Item</th><th>Qtd.</th><th>Carro</th><th>Motivo</th><th>Aberta em</th><th></th></tr></thead>
@@ -1739,20 +1926,658 @@ var PainelCarroEmergenciaElement = class extends HTMLElement {
   }
 };
 if (!customElements.get("painel-carro-emergencia")) customElements.define("painel-carro-emergencia", PainelCarroEmergenciaElement);
+
+// src/prescricao-enfermagem.ts
+var esc4 = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+var dataBr2 = (iso) => iso ? new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "\u2014";
+var nomeItem = (d, o) => `${d}${o ? " \u2014 " + o : ""}`;
+var opcoesNum = (de, ate, sel) => Array.from({ length: Math.max(0, ate - de + 1) }, (_, k) => de + k).map((n) => `<option value="${n}"${n === sel ? " selected" : ""}>${n}</option>`).join("");
+var EXTRA3 = (
+  /* css */
+  `
+.bloqueio{display:flex;flex-direction:column;gap:10px;align-items:flex-start;background:var(--pce-superficie);border:2px dashed var(--pce-linha);border-radius:10px;padding:22px}
+.bloqueio strong{font-size:18px;color:var(--pce-secundaria)}
+.bloqueio .regra{border-left:4px solid var(--pce-primaria);background:var(--pce-cabecalho);border-radius:6px;padding:8px 12px;font-size:14px}
+.fila{display:flex;flex-direction:column;gap:6px;width:100%}
+.fila button{display:flex;flex-wrap:wrap;gap:4px 14px;justify-content:space-between;text-align:left;width:100%}
+.card{background:var(--pce-superficie);border:1px solid var(--pce-linha);border-radius:8px;padding:14px 16px}
+.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px 18px}
+.meta div{display:flex;flex-direction:column;gap:2px}
+.meta small,.card>small{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--pce-suave);font-weight:600}
+.passo>small{font-size:13px;color:var(--pce-suave)}
+.passo{display:flex;flex-direction:column;gap:10px}
+.passo h2{margin:0;font-size:15px;color:var(--pce-secundaria);display:flex;gap:10px;align-items:baseline}
+.passo h2 span{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:var(--pce-primaria);color:#fff;font-size:13px}
+.tabela{overflow-x:auto;background:var(--pce-superficie);border:1px solid var(--pce-linha);border-radius:8px}
+.tabela table{min-width:760px}
+.opc{display:inline-block;background:var(--pce-cabecalho);color:var(--pce-primaria);border-radius:4px;padding:0 6px;font-size:13px;font-weight:600;margin-left:4px}
+.sub{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px;font-size:13px}
+.sub.perda{background:var(--pce-alerta-fundo);border-radius:6px;padding:6px 8px}
+.sub.nao{background:#fff3d6;border-radius:6px;padding:6px 8px}
+.sub select{font-family:inherit}
+.sub input{padding:4px 8px;font-size:13px}
+input[type=time]{padding:4px 6px;font:inherit}
+.chip{display:inline-block;border-radius:99px;padding:2px 10px;font-size:12px;font-weight:700;white-space:nowrap}
+.chip.ok{background:#dff3e6;color:#1e6b3a}.chip.pend{background:var(--pce-alerta);color:#fff}.chip.info{background:var(--pce-cabecalho);color:var(--pce-suave)}
+.cuidados{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:8px}
+.cuidado{display:flex;gap:8px;align-items:center;background:var(--pce-superficie);border:1px solid var(--pce-linha);border-radius:6px;padding:8px 10px}
+.cuidado input[type=text]{flex:1;min-width:0;padding:4px 8px;font-size:13px}
+.cuidado label{flex:1.3;display:flex;gap:8px;align-items:center}
+.cuidado input[type=checkbox]{width:18px;height:18px;accent-color:var(--pce-primaria)}
+.repo{font-size:14px;margin:0;padding-left:18px}
+.grade{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
+@media (max-width:860px){.grade{grid-template-columns:1fr}}
+.aviso-modelo{font-size:12px;color:var(--pce-suave)}
+td.n{font-weight:600;white-space:nowrap;font-variant-numeric:tabular-nums}
+`
+);
+var PrescricaoEnfermagemElement = class extends HTMLElement {
+  constructor() {
+    super();
+    this.enviar = null;
+    this._medica = null;
+    this._checklist = CHECKLIST_PADRAO;
+    this._cfg = null;
+    this.fila = [];
+    this.checagem = [];
+    this.materiais = /* @__PURE__ */ new Map();
+    this.linhasMat = [];
+    this.cuidados = [];
+    this.liberada = false;
+    this.bloqueioMsg = "";
+    this.canal = null;
+    this.parar = null;
+    this.pararAcomp = null;
+    this.root = this.attachShadow({ mode: "open" });
+    this.root.addEventListener("click", (e) => this.aoClicar(e));
+    this.root.addEventListener("change", (e) => this.aoMudar(e));
+    this.root.addEventListener("input", (e) => this.aoDigitar(e));
+  }
+  // ---------------------------------------------------------------- ciclo de vida
+  connectedCallback() {
+    const ep = this.getAttribute("endpoint");
+    if (ep && !this._cfg) this._cfg = { endpoint: ep };
+    this.renderizar();
+    const nome = this.getAttribute("canal") ?? CANAL_PADRAO;
+    if (nome !== "off" && typeof BroadcastChannel !== "undefined") {
+      this.canal = new BroadcastChannel(nome);
+      this.canal.onmessage = (ev) => {
+        const p = ev.data?.prescricao;
+        if (ev.data?.tipo === "prescricao" && p?.etapa === "MEDICA") this.receber(p);
+      };
+    }
+    const cli = this.cliente;
+    if (cli) {
+      void cli.listar(["AGUARDANDO_ENFERMAGEM", "EM_ENFERMAGEM"]).then(
+        (regs) => regs.sort((a, b) => a.recebidaEm.localeCompare(b.recebidaEm)).filter((r) => r.status === "AGUARDANDO_ENFERMAGEM" || r.enfermeiro === this.nomeEnfermeiro).forEach((r) => this.receber(r.prescricaoMedica ?? r.prescricao))
+      );
+      this.parar = cli.ouvir((evento, dados) => {
+        const id = dados?.prescricaoMedica?.id ?? dados?.prescricao?.id;
+        if (evento === "prescricao-medica-finalizada") this.receber(dados.prescricaoMedica ?? dados.prescricao);
+        else if (evento === "enfermagem-iniciada" && dados.enfermeiro !== this.nomeEnfermeiro || evento === "enfermagem-liberada") {
+          if (this.fila.some((f) => f.id === id)) {
+            this.fila = this.fila.filter((f) => f.id !== id);
+            if (!this._medica) this.renderizar();
+          }
+        }
+      });
+    }
+  }
+  disconnectedCallback() {
+    this.canal?.close();
+    this.parar?.();
+    this.pararAcomp?.();
+  }
+  // ---------------------------------------------------------------- API pública
+  get prescricaoMedica() {
+    return this._medica;
+  }
+  /** Carrega a prescrição médica. Se ela não estiver finalizada, a tela continua bloqueada. */
+  set prescricaoMedica(p) {
+    if (p && !medicaFinalizada(p)) {
+      this._medica = null;
+      this.bloqueioMsg = "A prescri\xE7\xE3o m\xE9dica recebida ainda n\xE3o foi finalizada.";
+      this.emitir("enfermagem-bloqueada", { prescricao: p, motivo: REGRA_BLOQUEIO });
+      this.renderizar();
+      return;
+    }
+    this._medica = p;
+    this.bloqueioMsg = "";
+    this.fila = this.fila.filter((f) => f.id !== p?.id);
+    this.checagem = p ? checagemInicial(p) : [];
+    this.materiais.clear();
+    this.cuidados = CUIDADOS_PADRAO.map((c) => ({ ...c, marcado: true }));
+    this.liberada = false;
+    this.pararAcomp?.();
+    this.renderizar();
+  }
+  get checklist() {
+    return this._checklist;
+  }
+  set checklist(c) {
+    this._checklist = c;
+    if (this.isConnected) this.renderizar();
+  }
+  configurar(cfg) {
+    this._cfg = cfg;
+  }
+  /** Recebe uma prescrição médica finalizada (fila) — carrega na hora se não houver outra aberta. */
+  receber(p) {
+    if (!medicaFinalizada(p)) return;
+    if (this._medica?.id === p.id || this.fila.some((f) => f.id === p.id)) return;
+    this.fila.push(p);
+    if (!this._medica || this.liberada) this.renderizar();
+    else this.avisar(`Nova prescri\xE7\xE3o m\xE9dica finalizada na fila (${p.contexto?.paciente ?? "paciente"}).`, "");
+  }
+  /** Abre uma prescrição da fila; com o serviço, reserva para este enfermeiro. */
+  async abrir(p) {
+    const cli = this.cliente;
+    const nome = this.nomeEnfermeiro;
+    if (cli && nome) {
+      try {
+        const r = await cli.iniciarEnfermagem(p.id, nome);
+        if (!r.ok) {
+          this.fila = this.fila.filter((f) => f.id !== p.id);
+          this.bloqueioMsg = r.mensagem ?? "N\xE3o foi poss\xEDvel iniciar a prescri\xE7\xE3o de enfermagem.";
+          this.renderizar();
+          return false;
+        }
+      } catch {
+      }
+    }
+    this.prescricaoMedica = p;
+    return true;
+  }
+  obterPrescricaoEnfermagem() {
+    const m = this._medica;
+    if (!m) throw new Error(REGRA_BLOQUEIO);
+    const materiais = [];
+    for (const l of this.linhasMat)
+      for (const u of this.materiais.get(l.chave) ?? [])
+        materiais.push({
+          secao: l.secao,
+          codigo: l.item.codigo ?? null,
+          descricao: l.item.descricao,
+          opcao: u.opcao || null,
+          quantidade: u.quantidade,
+          unidade: l.item.unidade ?? "und",
+          quantitativoPrevisto: l.item.maximo
+        });
+    const v = (id) => this.root.getElementById(id)?.value.trim() ?? "";
+    return {
+      tipo: "PRESCRICAO_ENFERMAGEM_CARRO",
+      versao: 1,
+      id: novoId(),
+      prescricaoMedicaId: m.id,
+      dataHora: (/* @__PURE__ */ new Date()).toISOString(),
+      enfermeiro: this.nomeEnfermeiro,
+      coren: this.getAttribute("coren") ?? (v("coren") || null),
+      numeroCarro: v("numeroCarro"),
+      lacreRompido: v("lacreRompido"),
+      lacreNovo: v("lacreNovo") || null,
+      checagem: this.checagem.map((c) => ({ ...c })),
+      materiais,
+      cuidados: this.cuidados.filter((c) => c.marcado && c.descricao.trim()).map((c) => ({ descricao: c.descricao.trim(), frequencia: c.frequencia.trim() || null })),
+      justificativa: v("justificativa") || null
+    };
+  }
+  async liberar() {
+    const msg = this.$("#msgFim");
+    msg.className = "msg";
+    const m = this._medica;
+    if (!m) return;
+    const e = this.obterPrescricaoEnfermagem();
+    const erros = validarEnfermagem(e, m, this._checklist);
+    if (erros.length) {
+      msg.textContent = erros.join(" ");
+      msg.classList.add("erro");
+      return;
+    }
+    const reposicao = montarReposicao(m, e);
+    const continuar = this.dispatchEvent(
+      new CustomEvent("enfermagem-liberada", { detail: { enfermagem: e, reposicao }, bubbles: true, composed: true, cancelable: true })
+    );
+    let status = "Libera\xE7\xE3o entregue ao G-HOSP.";
+    if (continuar) {
+      const envio = this.enviar ?? (this._cfg?.endpoint ? (x) => criarEnvioHttp(this._cfg)(x) : null) ?? (this.cliente ? (x) => this.cliente.liberarEnfermagem(x) : null);
+      if (!envio) status = "Envio ao G-HOSP n\xE3o configurado. A farm\xE1cia deste computador foi avisada.";
+      else {
+        const b = this.$("#liberar");
+        b.disabled = true;
+        b.textContent = "Liberando\u2026";
+        try {
+          const r = await envio(e, reposicao);
+          if (!r.enviado) {
+            msg.textContent = `N\xE3o foi poss\xEDvel liberar${r.status ? ` (c\xF3digo ${r.status})` : ""}. ${r.mensagem ?? "Tente de novo."}`;
+            msg.classList.add("erro");
+            this.emitir("enfermagem-erro", { enfermagem: e, erro: r });
+            b.disabled = false;
+            b.textContent = "Liberar para a farm\xE1cia";
+            return;
+          }
+          status = r.mensagem ?? "Liberado para a farm\xE1cia.";
+          this.emitir("enfermagem-enviada", { enfermagem: e, reposicao, resultado: r });
+        } catch (err) {
+          msg.textContent = "N\xE3o foi poss\xEDvel conectar ao servi\xE7o. Verifique a rede e tente de novo.";
+          msg.classList.add("erro");
+          this.emitir("enfermagem-erro", { enfermagem: e, erro: err });
+          b.disabled = false;
+          b.textContent = "Liberar para a farm\xE1cia";
+          return;
+        }
+      }
+    }
+    if (!this.cliente) {
+      try {
+        this.canal?.postMessage({ tipo: "prescricao", prescricao: reposicao });
+      } catch {
+      }
+    }
+    this.liberada = true;
+    this.mostrarResultado(e, reposicao, status);
+  }
+  // ---------------------------------------------------------------- internos
+  get cliente() {
+    const s = this.getAttribute("servidor");
+    return s !== null ? new ClienteServico(s, this.getAttribute("token")) : null;
+  }
+  get nomeEnfermeiro() {
+    return (this.getAttribute("enfermeiro") ?? this.root.getElementById("enfermeiro")?.value ?? "").trim();
+  }
+  $(sel) {
+    return this.root.querySelector(sel);
+  }
+  emitir(nome, detail) {
+    this.dispatchEvent(new CustomEvent(nome, { detail, bubbles: true, composed: true }));
+  }
+  avisar(t, tipo) {
+    const el = this.$("#msgFim") ?? this.$("#msgBloq");
+    if (el) {
+      el.textContent = t;
+      el.className = `msg${tipo ? " " + tipo : ""}`;
+    }
+  }
+  // ---------------------------------------------------------------- renderização
+  renderizar() {
+    const m = this._medica;
+    const corpo = m ? this.htmlAberto(m) : this.htmlBloqueado();
+    this.root.innerHTML = `<style>${ESTILOS}${EXTRA3}</style>
+      <div class="wrap">
+        <div class="topo"><h1>Prescri\xE7\xE3o de Enfermagem \xB7 P\xF3s-parada</h1></div>
+        ${corpo}
+      </div>`;
+    if (m) {
+      this.checagem.forEach((_, i) => this.renderizarChecagem(i));
+      this.linhasMat.forEach((l) => this.renderizarMaterial(l));
+      this.atualizarResumo();
+    }
+  }
+  htmlBloqueado() {
+    const fila = this.fila.map(
+      (p) => `<button type="button" data-acao="abrir" data-id="${esc4(p.id)}">
+          <strong>${esc4(p.contexto?.paciente ?? "Paciente")}</strong>
+          <span>${p.itens.length} ${p.itens.length === 1 ? "medicamento" : "medicamentos"} \xB7 Dr(a). ${esc4(p.medico ?? p.contexto?.prescritor ?? "\u2014")} \xB7 finalizada ${dataBr2(p.finalizadaEm)}</span></button>`
+    ).join("");
+    return `<div class="bloqueio" role="status">
+      <strong>\u{1F512} Aguardando a finaliza\xE7\xE3o da prescri\xE7\xE3o m\xE9dica</strong>
+      <div class="regra">${REGRA_BLOQUEIO}</div>
+      ${this.bloqueioMsg ? `<span class="msg erro">${esc4(this.bloqueioMsg)}</span>` : ""}
+      ${fila ? `<small>Prescri\xE7\xF5es m\xE9dicas finalizadas, prontas para a enfermagem:</small><div class="fila">${fila}</div>` : `<span class="msg" id="msgBloq">Nenhuma prescri\xE7\xE3o m\xE9dica finalizada no momento. Ela aparece aqui assim que o m\xE9dico finalizar.</span>`}
+    </div>`;
+  }
+  htmlAberto(m) {
+    const c = m.contexto ?? { atendimento: null, paciente: null, prescritor: null, setor: null };
+    const meta = [
+      ["Paciente", c.paciente],
+      ["Atendimento", c.atendimento],
+      ["Setor", c.setor],
+      ["M\xE9dico", m.medico ?? c.prescritor],
+      ["Prescri\xE7\xE3o m\xE9dica finalizada", dataBr2(m.finalizadaEm)]
+    ].filter(([, v]) => v).map(([k, v]) => `<div><small>${k}</small><strong>${esc4(v)}</strong></div>`).join("");
+    this.linhasMat = [];
+    const secoes = this._checklist.map((sec, si) => {
+      if (!SECOES_MATERIAIS.includes(sec.titulo)) return "";
+      const trs = sec.itens.map((item, ii) => {
+        const chave = `${si}_${ii}`;
+        this.linhasMat.push({ chave, secao: sec.titulo, item });
+        const dica = item.opcoes ? `<span class="dica">${item.opcoes.map(esc4).join(" \xB7 ")}</span>` : "";
+        return `<tr data-mat="${chave}"><td><label class="item"><input type="checkbox" data-acao="marcar-mat"${this.materiais.has(chave) ? " checked" : ""}><span>${esc4(item.descricao)}${dica}</span></label></td>
+            <td class="qtd"><div class="linhas" hidden></div></td></tr>`;
+      }).join("");
+      return `<section><h2>${esc4(sec.titulo)}<small>${sec.itens.length} itens</small></h2>
+          <table><thead><tr><th>Material</th><th class="dir">Utilizado</th></tr></thead><tbody>${trs}</tbody></table></section>`;
+    }).filter(Boolean);
+    const cuidados = this.cuidados.map((cu, k) => `<div class="cuidado"><label><input type="checkbox" data-cui="${k}" data-f="marcado"${cu.marcado ? " checked" : ""}>
+          <input type="text" data-cui="${k}" data-f="descricao" value="${esc4(cu.descricao)}" aria-label="Cuidado"></label>
+          <input type="text" data-cui="${k}" data-f="frequencia" value="${esc4(cu.frequencia)}" placeholder="Frequ\xEAncia" aria-label="Frequ\xEAncia"></div>`).join("");
+    const enf = this.getAttribute("enfermeiro");
+    const coren = this.getAttribute("coren");
+    return `
+      <div class="card meta">${meta}</div>
+      ${m.justificativa ? `<div class="card"><small>Observa\xE7\xF5es m\xE9dicas</small><div>${esc4(m.justificativa)}</div></div>` : ""}
+
+      <div class="passo">
+        <h2><span>1</span>Checagem da prescri\xE7\xE3o m\xE9dica</h2>
+        <small>Confirme o que foi administrado. Registre perdas (quebra, dilu\xEDdo e n\xE3o utilizado) e o motivo do que n\xE3o foi administrado.</small>
+        <div class="tabela"><table>
+          <thead><tr><th>Medicamento</th><th>Prescrito</th><th>Administrado</th><th>Hor\xE1rio</th><th>Ocorr\xEAncias</th><th>Situa\xE7\xE3o</th></tr></thead>
+          <tbody>${this.checagem.map((_, i) => `<tr id="c${i}"></tr>`).join("")}</tbody>
+        </table></div>
+      </div>
+
+      <div class="passo">
+        <h2><span>2</span>Materiais utilizados</h2>
+        <small>Prescri\xE7\xE3o de enfermagem dos materiais usados na parada. A quantidade n\xE3o passa do check list.</small>
+        <div class="grade">${secoes.join("")}</div>
+      </div>
+
+      <div class="passo">
+        <h2><span>3</span>Cuidados de enfermagem p\xF3s-PCR</h2>
+        <span class="aviso-modelo">Lista modelo: ajuste ao protocolo institucional. Desmarque o que n\xE3o se aplica.</span>
+        <div class="cuidados">${cuidados}</div>
+        <div><button type="button" class="mini add" data-acao="add-cuidado">+ cuidado</button></div>
+      </div>
+
+      <div class="passo">
+        <h2><span>4</span>Libera\xE7\xE3o para a farm\xE1cia</h2>
+        <div class="campos">
+          <label for="numeroCarro">N\xFAmero do carro de parada<input id="numeroCarro" type="text" inputmode="numeric" value="${esc4(this.getAttribute("numero-carro") ?? m.numeroCarro ?? "")}"></label>
+          <label for="lacreRompido">Lacre rompido<input id="lacreRompido" type="text" inputmode="numeric"></label>
+          <label for="lacreNovo">Lacre novo<input id="lacreNovo" type="text" inputmode="numeric"></label>
+          ${enf ? `<label>Enfermeiro<input type="text" value="${esc4(enf)}" disabled></label>` : `<label for="enfermeiro">Enfermeiro<input id="enfermeiro" type="text"></label>`}
+          ${coren ? `<label>COREN<input type="text" value="${esc4(coren)}" disabled></label>` : `<label for="coren">COREN<input id="coren" type="text"></label>`}
+        </div>
+        <div class="just"><label for="justificativa">Justificativa / observa\xE7\xF5es da enfermagem</label>
+          <small>As perdas e os itens n\xE3o administrados informados na checagem entram automaticamente.</small>
+          <textarea id="justificativa" placeholder="Opcional"></textarea></div>
+        <div class="card"><small>Vai para a farm\xE1cia repor</small><ul class="repo" id="repo"></ul></div>
+        <div class="gerar">
+          <span class="msg" id="msgFim" aria-live="polite">Revise a checagem e libere para a farm\xE1cia.</span>
+          <button class="primario grande" id="liberar" type="button" data-acao="liberar">Liberar para a farm\xE1cia</button>
+        </div>
+        <section class="rx" id="resultado" hidden></section>
+      </div>`;
+  }
+  renderizarChecagem(i) {
+    const c = this.checagem[i];
+    const tr = this.$(`#c${i}`);
+    if (!tr) return;
+    const max = itemDoChecklist(c.descricao, this._checklist)?.maximo ?? c.prescrito;
+    const outros = this.checagem.reduce((s, x, j) => j !== i && x.descricao === c.descricao ? s + consumo(x) : s, 0);
+    const maxPerda = Math.max(1, max - outros - c.administrado);
+    const falta = c.prescrito - c.administrado;
+    const ok = (falta === 0 || !!c.naoAdministrado?.motivo) && (!c.perda || !!c.perda.motivo);
+    const nao = falta > 0 ? `<div class="sub nao">N\xE3o administrado: ${falta} ${c.unidade} \xB7
+          <select data-i="${i}" data-f="nao-motivo" aria-label="Motivo de n\xE3o administrar"><option value="">Motivo\u2026</option>${Object.entries(TEXTO_NAO_ADMINISTRADO).map(([k, v]) => `<option value="${k}"${c.naoAdministrado?.motivo === k ? " selected" : ""}>${v}</option>`).join("")}</select>
+          <input data-i="${i}" data-f="nao-obs" value="${esc4(c.naoAdministrado?.observacao ?? "")}" placeholder="Observa\xE7\xE3o" aria-label="Observa\xE7\xE3o"></div>` : "";
+    const perda = c.perda ? `<div class="sub perda">Perda:
+          <select data-i="${i}" data-f="perda-qtd" aria-label="Quantidade perdida">${opcoesNum(1, maxPerda, c.perda.quantidade)}</select> ${c.unidade} \xB7
+          <select data-i="${i}" data-f="perda-motivo" aria-label="Motivo da perda"><option value="">Motivo\u2026</option>${Object.entries(TEXTO_PERDA).map(([k, v]) => `<option value="${k}"${c.perda.motivo === k ? " selected" : ""}>${v}</option>`).join("")}</select>
+          <input data-i="${i}" data-f="perda-obs" value="${esc4(c.perda.observacao ?? "")}" placeholder="Observa\xE7\xE3o" aria-label="Observa\xE7\xE3o da perda">
+          <button type="button" class="mini" data-acao="rem-perda" data-i="${i}" aria-label="Remover perda">\u2715</button></div>` : "";
+    tr.innerHTML = `<td>${esc4(c.descricao)}${c.opcao ? `<span class="opc">${esc4(c.opcao)}</span>` : ""}</td>
+      <td class="n">${String(c.prescrito).padStart(2, "0")} ${c.unidade}</td>
+      <td><select data-i="${i}" data-f="adm" aria-label="Quantidade administrada">${opcoesNum(0, c.prescrito, c.administrado)}</select></td>
+      <td><input type="time" data-i="${i}" data-f="horario" value="${esc4(c.horario ?? "")}" aria-label="Hor\xE1rio"></td>
+      <td>${nao}${perda}${c.perda ? "" : `<button type="button" class="mini perigo" data-acao="add-perda" data-i="${i}">+ perda</button>`}</td>
+      <td><span class="chip ${ok ? "ok" : "pend"}">${ok ? "Checado" : "Pendente"}</span></td>`;
+  }
+  renderizarMaterial(l) {
+    const tr = this.$(`tr[data-mat="${l.chave}"]`);
+    if (!tr) return;
+    const caixa = tr.querySelector(".linhas");
+    const linhas = this.materiais.get(l.chave);
+    tr.classList.toggle("on", !!linhas);
+    caixa.hidden = !linhas;
+    if (!linhas) return void (caixa.innerHTML = "");
+    const un = l.item.unidade ?? "und";
+    caixa.innerHTML = linhas.map((u, k) => {
+      const ocupadas = new Set(linhas.filter((_, j) => j !== k).map((x) => x.opcao).filter(Boolean));
+      const opc = l.item.opcoes ? `<select class="opc${u.opcao ? "" : " pend"}" data-mat-f="o" data-k="${k}" aria-label="Op\xE7\xE3o"><option value="" disabled${u.opcao ? "" : " selected"}>Qual?</option>
+              ${l.item.opcoes.filter((o) => !ocupadas.has(o) || o === u.opcao).map((o) => `<option${o === u.opcao ? " selected" : ""}>${esc4(o)}</option>`).join("")}</select>` : "";
+      const del = linhas.length > 1 ? `<button type="button" class="mini" data-acao="del-mat" data-k="${k}" aria-label="Remover">\u2715</button>` : "";
+      return `<div class="linha">${opc}<span class="un">${un}</span><select data-mat-f="q" data-k="${k}" aria-label="Quantidade">${opcoesNum(1, limiteDaLinha(l.item, linhas, k), u.quantidade)}</select>${del}</div>`;
+    }).join("") + (podeAdicionarOpcao(l.item, linhas) ? `<button type="button" class="mini add" data-acao="add-mat">+ outra op\xE7\xE3o</button>` : "");
+  }
+  atualizarResumo() {
+    const ul = this.$("#repo");
+    const m = this._medica;
+    if (!ul || !m) return;
+    const msg = this.$("#msgFim");
+    if (msg?.classList.contains("erro") && !this.liberada) {
+      msg.className = "msg";
+      msg.textContent = "Revise a checagem e libere para a farm\xE1cia.";
+    }
+    const e = this.obterPrescricaoEnfermagem();
+    const r = montarReposicao(m, e);
+    ul.innerHTML = r.itens.length ? r.itens.map((i) => `<li>${String(i.quantidade).padStart(2, "0")} ${i.unidade} \xB7 ${esc4(nomeItem(i.descricao, i.opcao))}</li>`).join("") : "<li>Nada a repor.</li>";
+  }
+  mostrarResultado(e, r, status) {
+    this.root.querySelectorAll(".passo input, .passo select, .passo textarea, .passo button[data-acao]").forEach((el2) => el2.disabled = true);
+    const el = this.$("#resultado");
+    el.hidden = false;
+    el.innerHTML = `<h2>Liberado para a farm\xE1cia</h2>
+      <div class="bloco">Carro n\xBA ${esc4(e.numeroCarro)} \xB7 lacre rompido ${esc4(e.lacreRompido)}${e.lacreNovo ? ` \xB7 lacre novo ${esc4(e.lacreNovo)}` : ""} \xB7 ${esc4(e.enfermeiro)}${e.coren ? ` (COREN ${esc4(e.coren)})` : ""}</div>
+      <div class="bloco">${r.itens.length} ${r.itens.length === 1 ? "item" : "itens"} para repor \xB7 ${e.cuidados.length} cuidados prescritos</div>
+      <div class="bloco status">${esc4(status)}</div>
+      <div class="bloco" id="acomp" hidden></div>
+      <div class="bloco"><button type="button" class="primario" data-acao="copiar-termo">Copiar prescri\xE7\xE3o de enfermagem</button>
+        <button type="button" data-acao="copiar-json">Copiar dados (JSON)</button>
+        <button type="button" data-acao="proxima">${this.fila.length ? "Pr\xF3xima prescri\xE7\xE3o m\xE9dica" : "Voltar \xE0 fila"}</button></div>`;
+    el._d = { e, r };
+    el.querySelectorAll("button").forEach((b) => b.disabled = false);
+    el.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+    this.acompanhar(r.id);
+  }
+  acompanhar(id) {
+    const cli = this.cliente;
+    const el = this.$("#acomp");
+    if (!cli || !el) return;
+    const mostrar = (t) => (el.hidden = false, el.innerHTML = `<strong>Farm\xE1cia:</strong> ${t}`);
+    mostrar(ROTULO_FLUXO.AGUARDANDO_FARMACIA);
+    this.pararAcomp?.();
+    const reler = async () => {
+      const reg = await cli.obter(id);
+      if (!reg) return;
+      mostrar(`${ROTULO_FLUXO[reg.status]}${reg.status === "EM_CONFERENCIA" && reg.farmaceutico ? ` por ${esc4(reg.farmaceutico)}` : ""}`);
+    };
+    this.pararAcomp = cli.ouvir((ev, d) => {
+      const reg = ev === "conferencia-concluida" ? d.registro : d;
+      if (reg?.prescricao?.id !== id) return;
+      if (ev === "conferencia-iniciada") mostrar(`${ROTULO_FLUXO.EM_CONFERENCIA} por ${esc4(reg.farmaceutico)}`);
+      if (ev === "conferencia-concluida") mostrar(`${ROTULO_FLUXO[reg.status]} \xB7 lacre ${esc4(d.conferencia?.lacreAplicado ?? "\u2014")}`);
+    }, () => void reler());
+  }
+  // ---------------------------------------------------------------- eventos
+  aoClicar(ev) {
+    const b = ev.target.closest("button[data-acao]");
+    if (!b) return;
+    const i = Number(b.dataset.i);
+    const tr = b.closest("tr[data-mat]");
+    const lm = tr ? this.linhasMat.find((l) => l.chave === tr.dataset.mat) : void 0;
+    switch (b.dataset.acao) {
+      case "abrir": {
+        const p = this.fila.find((f) => f.id === b.dataset.id);
+        if (p) void this.abrir(p);
+        return;
+      }
+      case "proxima":
+        this._medica = null;
+        this.liberada = false;
+        this.pararAcomp?.();
+        this.renderizar();
+        return;
+      case "add-perda":
+        this.checagem[i].perda = { quantidade: 1, motivo: "", observacao: null };
+        break;
+      case "rem-perda":
+        this.checagem[i].perda = null;
+        break;
+      case "add-mat":
+        if (lm) this.materiais.set(lm.chave, normalizarLinhas(lm.item, [...this.materiais.get(lm.chave), { opcao: "", quantidade: 1 }]));
+        if (lm) this.renderizarMaterial(lm);
+        return void this.atualizarResumo();
+      case "del-mat":
+        if (lm) {
+          const ls = this.materiais.get(lm.chave);
+          ls.splice(Number(b.dataset.k), 1);
+          this.materiais.set(lm.chave, normalizarLinhas(lm.item, ls));
+          this.renderizarMaterial(lm);
+        }
+        return void this.atualizarResumo();
+      case "add-cuidado":
+        this.cuidados.push({ descricao: "", frequencia: "", marcado: true });
+        this.renderizar();
+        [...this.root.querySelectorAll('input[data-f="descricao"]')].pop()?.focus();
+        return;
+      case "liberar":
+        return void this.liberar();
+      case "copiar-termo":
+      case "copiar-json": {
+        const d = this.$("#resultado")._d;
+        if (!d) return;
+        const txt = b.dataset.acao === "copiar-json" ? JSON.stringify(d, null, 2) : textoPrescricaoEnfermagem(d.e, d.r);
+        const rot = b.textContent;
+        navigator.clipboard.writeText(txt).then(() => b.textContent = "Copiado", () => b.textContent = "N\xE3o foi poss\xEDvel copiar");
+        setTimeout(() => b.textContent = rot, 2e3);
+        return;
+      }
+      default:
+        return;
+    }
+    this.renderizarChecagem(i);
+    this.atualizarResumo();
+  }
+  aoMudar(ev) {
+    const t = ev.target;
+    const tr = t.closest("tr[data-mat]");
+    if (tr) {
+      const l = this.linhasMat.find((x) => x.chave === tr.dataset.mat);
+      if (t.dataset.acao === "marcar-mat") {
+        if (t.checked) this.materiais.set(l.chave, [{ opcao: l.item.opcoes ? "" : null, quantidade: 1 }]);
+        else this.materiais.delete(l.chave);
+      } else if (t.dataset.matF) {
+        const ls = this.materiais.get(l.chave);
+        const k = Number(t.dataset.k);
+        if (t.dataset.matF === "q") ls[k].quantidade = Number(t.value);
+        else ls[k].opcao = t.value;
+        this.materiais.set(l.chave, normalizarLinhas(l.item, ls));
+      } else return;
+      this.renderizarMaterial(l);
+      return this.atualizarResumo();
+    }
+    if (t.dataset.cui !== void 0 && t.dataset.f === "marcado") {
+      this.cuidados[Number(t.dataset.cui)].marcado = t.checked;
+      return;
+    }
+    const i = Number(t.dataset.i);
+    const c = this.checagem[i];
+    if (!c) return;
+    switch (t.dataset.f) {
+      case "adm":
+        c.administrado = Number(t.value);
+        if (c.administrado === c.prescrito) c.naoAdministrado = null;
+        else c.naoAdministrado ?? (c.naoAdministrado = { motivo: "", observacao: null });
+        break;
+      case "horario":
+        c.horario = t.value || null;
+        return;
+      case "nao-motivo":
+        c.naoAdministrado = { motivo: t.value, observacao: c.naoAdministrado?.observacao ?? null };
+        break;
+      case "perda-qtd":
+        if (c.perda) c.perda.quantidade = Number(t.value);
+        break;
+      case "perda-motivo":
+        if (c.perda) c.perda.motivo = t.value;
+        break;
+      default:
+        return;
+    }
+    this.renderizarChecagem(i);
+    this.atualizarResumo();
+  }
+  aoDigitar(ev) {
+    const t = ev.target;
+    if (t.dataset.cui !== void 0 && (t.dataset.f === "descricao" || t.dataset.f === "frequencia")) {
+      this.cuidados[Number(t.dataset.cui)][t.dataset.f] = t.value;
+      return;
+    }
+    const c = this.checagem[Number(t.dataset.i)];
+    if (!c) return;
+    if (t.dataset.f === "nao-obs" && c.naoAdministrado) c.naoAdministrado.observacao = t.value || null;
+    if (t.dataset.f === "perda-obs" && c.perda) c.perda.observacao = t.value || null;
+    if (t.dataset.f === "nao-obs" || t.dataset.f === "perda-obs") this.atualizarResumo();
+  }
+};
+function textoPrescricaoEnfermagem(e, r) {
+  let t = `PRESCRI\xC7\xC3O DE ENFERMAGEM \u2014 P\xD3S-PARADA
+Carro de parada n\xBA ${e.numeroCarro} \xB7 ${dataBr2(e.dataHora)}
+`;
+  t += `Enfermeiro: ${e.enfermeiro}${e.coren ? ` (COREN ${e.coren})` : ""} \xB7 Lacre rompido: ${e.lacreRompido} \xB7 Lacre novo: ${e.lacreNovo ?? "\u2014"}
+`;
+  if (r.contexto?.paciente) t += `Paciente: ${r.contexto.paciente}${r.contexto.atendimento ? ` \xB7 Atendimento ${r.contexto.atendimento}` : ""}
+`;
+  t += `
+CHECAGEM DA PRESCRI\xC7\xC3O M\xC9DICA (${r.medico ?? "m\xE9dico"}, finalizada ${dataBr2(r.finalizadaEm)})
+`;
+  for (const c of e.checagem) {
+    t += `  ${nomeItem(c.descricao, c.opcao)}: administrado ${c.administrado}/${c.prescrito} ${c.unidade}${c.horario ? ` \xE0s ${c.horario}` : ""}`;
+    if (c.naoAdministrado) t += ` \xB7 n\xE3o administrado: ${TEXTO_NAO_ADMINISTRADO[c.naoAdministrado.motivo] ?? "\u2014"}`;
+    if (c.perda) t += ` \xB7 perda ${c.perda.quantidade}: ${TEXTO_PERDA[c.perda.motivo] ?? "\u2014"}`;
+    t += "\n";
+  }
+  if (e.materiais.length) {
+    t += `
+MATERIAIS
+`;
+    for (const m of e.materiais) t += `  ${String(m.quantidade).padStart(2, "0")} ${m.unidade.padEnd(4)} ${nomeItem(m.descricao, m.opcao)}
+`;
+  }
+  if (e.cuidados.length) {
+    t += `
+CUIDADOS DE ENFERMAGEM
+`;
+    for (const c of e.cuidados) t += `  [ ] ${c.descricao}${c.frequencia ? ` \u2014 ${c.frequencia}` : ""}
+`;
+  }
+  t += `
+REPOSI\xC7\xC3O SOLICITADA \xC0 FARM\xC1CIA
+`;
+  for (const i of r.itens) t += `  ${String(i.quantidade).padStart(2, "0")} ${i.unidade.padEnd(4)} ${nomeItem(i.descricao, i.opcao)}
+`;
+  if (r.justificativa) t += `
+Observa\xE7\xF5es: ${r.justificativa}
+`;
+  return t.trimEnd();
+}
+if (!customElements.get("prescricao-enfermagem-carro")) customElements.define("prescricao-enfermagem-carro", PrescricaoEnfermagemElement);
 export {
   CANAL_PADRAO,
   CHECKLIST_PADRAO,
+  CUIDADOS_PADRAO,
   ClienteServico,
   ConferenciaFarmaciaElement,
   ErroValidacao,
   PainelCarroEmergenciaElement,
   PrescricaoCarroEmergenciaElement,
+  PrescricaoEnfermagemElement,
+  REGRA_BLOQUEIO,
   ROTULO_FLUXO,
+  SECOES_MATERIAIS,
+  SECOES_MEDICAS,
+  TEXTO_NAO_ADMINISTRADO,
+  TEXTO_PERDA,
+  checagemInicial,
+  consumo,
   criarEnvioHttp,
   dataGs1,
   diasParaVencer,
+  itemDoChecklist,
   lerCodigo,
   limiteDaLinha,
+  medicaFinalizada,
+  montarReposicao,
   normalizarGtin,
   normalizarLinhas,
   novoId,
@@ -1761,5 +2586,7 @@ export {
   somarLote,
   statusDaLinha,
   termoReposicao,
-  textoPrescricao
+  textoPrescricao,
+  textoPrescricaoEnfermagem,
+  validarEnfermagem
 };

@@ -22,8 +22,9 @@
   <header>
     <strong>Carro de Emergência</strong>
     <nav>
-      <a href="#enfermagem" data-v="enfermagem">Enfermagem</a>
-      <a href="#farmacia" data-v="farmacia">Farmácia<span class="badge" id="fila" hidden></span></a>
+      <a href="#medico" data-v="medico">1 · Médico</a>
+      <a href="#enfermagem" data-v="enfermagem">2 · Enfermagem<span class="badge" id="filaEnf" hidden></span></a>
+      <a href="#farmacia" data-v="farmacia">3 · Farmácia<span class="badge" id="fila" hidden></span></a>
       <a href="#painel" data-v="painel">Painel</a>
     </nav>
     <label class="quem">Usuário <input id="usuario" autocomplete="name" placeholder="Seu nome"></label>
@@ -39,7 +40,7 @@
     const vista = document.getElementById("vista");
 
     function mostrar() {
-      const v = (location.hash || "#enfermagem").slice(1);
+      const v = (location.hash || "#medico").slice(1);
       document.querySelectorAll("nav a").forEach(a => a.dataset.v === v ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
       vista.innerHTML = "";
       let el;
@@ -49,8 +50,12 @@
         el.setAttribute("validade-minima-dias", "90");
       } else if (v === "painel") {
         el = document.createElement("painel-carro-emergencia");
+      } else if (v === "enfermagem") {
+        el = document.createElement("prescricao-enfermagem-carro");
+        el.setAttribute("enfermeiro", usuario());
       } else {
         el = document.createElement("prescricao-carro-emergencia");
+        el.setAttribute("modo", "medico");
         el.setAttribute("prescritor", usuario());
       }
       el.setAttribute("servidor", "");          // mesmo endereço deste serviço
@@ -64,9 +69,12 @@
     // Contador da fila da farmácia no menu, em tempo real.
     const cli = new PrescricaoCarro.ClienteServico("");
     const contar = async () => {
-      const n = (await cli.listar(["AGUARDANDO_FARMACIA"])).length;
-      const b = document.getElementById("fila");
-      b.hidden = !n; b.textContent = n;
+      const regs = await cli.listar(["AGUARDANDO_ENFERMAGEM", "AGUARDANDO_FARMACIA"]);
+      for (const [id, st] of [["filaEnf", "AGUARDANDO_ENFERMAGEM"], ["fila", "AGUARDANDO_FARMACIA"]]) {
+        const n = regs.filter(r => r.status === st).length;
+        const b = document.getElementById(id);
+        b.hidden = !n; b.textContent = n;
+      }
     };
     cli.ouvir(contar); contar();
   </script>

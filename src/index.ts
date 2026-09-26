@@ -9,3 +9,5 @@ export { diasParaVencer, problemaDoLote, statusDaLinha, somarLote } from "./conf
 export { novoId, CANAL_PADRAO } from "./prescricao-carro-emergencia.js";
 export { PainelCarroEmergenciaElement } from "./painel-carro-emergencia.js";
 export { ClienteServico, ROTULO_FLUXO } from "./integracao.js";
+export { PrescricaoEnfermagemElement, textoPrescricaoEnfermagem } from "./prescricao-enfermagem.js";
+export * from "./regras-enfermagem.js";
